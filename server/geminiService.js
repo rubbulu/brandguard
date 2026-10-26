@@ -41,11 +41,10 @@ const RESPONSE_SCHEMA = {
 
 export const ACTIVE_MODEL = process.env.GEMINI_MODEL || "gemini-3-flash-preview";
 
-// Fast model cascade: gemini-3-flash-preview (1.6s latency) prioritized
+// Fast, stable models only
 export const CANDIDATE_MODELS = [
   ACTIVE_MODEL,
-  "gemini-3.5-flash",
-  "gemini-flash-latest"
+  "gemini-3.5-flash"
 ].filter((v, i, a) => a.indexOf(v) === i);
 
 export async function callGeminiReview({ apiKey, draftText, rules, facts }) {
@@ -82,44 +81,35 @@ ${draftText}`;
   let lastError = null;
 
   for (const model of CANDIDATE_MODELS) {
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 8000); // 8s fast timeout
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 25000); // 25s generous timeout for full inference
 
-        const response = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-          signal: controller.signal
-        });
-        clearTimeout(timeout);
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
+      clearTimeout(timeout);
 
-        if (response.ok) {
-          const data = await response.json();
-          const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (!rawText) return [];
-          const parsed = JSON.parse(rawText);
-          return parsed.findings || [];
-        }
-
-        if (response.status === 503 || response.status === 429) {
-          console.warn(`[Gemini ${model}] Status ${response.status}. Attempt ${attempt} failed, retrying...`);
-          await new Promise(r => setTimeout(r, 1200));
-          continue; // retry same model once
-        }
-
-        const errBody = await response.text();
-        console.warn(`[Gemini ${model}] Non-retryable error (${response.status}): ${errBody.slice(0, 120)}`);
-        break; // skip to next candidate model
-      } catch (err) {
-        lastError = err;
-        console.warn(`[Gemini ${model}] Network or timeout error: ${err.message}`);
-        await new Promise(r => setTimeout(r, 800));
+      if (response.ok) {
+        const data = await response.json();
+        const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!rawText) return [];
+        const parsed = JSON.parse(rawText);
+        return parsed.findings || [];
       }
+
+      const errBody = await response.text();
+      console.warn(`[Gemini ${model}] Error (${response.status}): ${errBody.slice(0, 100)}`);
+      lastError = new Error(`Model ${model} returned ${response.status}`);
+    } catch (err) {
+      lastError = err;
+      console.warn(`[Gemini ${model}] Failed: ${err.message}`);
     }
   }
 
-  throw new Error(`AI Review failed across all fallback models: ${lastError?.message || "Unavailable"}`);
+  throw new Error(`AI Review failed across all models: ${lastError?.message || "Unavailable"}`);
 }
