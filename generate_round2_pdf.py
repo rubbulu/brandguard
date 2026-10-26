@@ -147,7 +147,7 @@ def build_pdf(filename="BrandGuard_Round2_Submission.pdf"):
         [Paragraph("Problem Statement", table_header), Paragraph("Brand-governance platform, by <b>Inkloom AI</b>", table_cell)],
         [Paragraph("Team & Participant", table_header), Paragraph("<b>BrandGuard</b> (Individual participant: Mohammad Rubina Sultana, 3rd Year IT, AUCEW)", table_cell)],
         [Paragraph("Public Repository", table_header), Paragraph('<font color="#2563eb"><u>https://github.com/rubbulu/brandguard</u></font>', table_cell)],
-        [Paragraph("Live Project Link", table_header), Paragraph('Hosted on Render / Vercel with zero-friction judge demo mode', table_cell)],
+        [Paragraph("Live Project Link", table_header), Paragraph('<font color="#2563eb"><u>https://brandguard-kbw7.onrender.com</u></font>', table_cell)],
     ]
     t_meta = Table(meta_data, colWidths=[130, 374])
     t_meta.setStyle(TableStyle([
