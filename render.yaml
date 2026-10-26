@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: brandguard
+    runtime: node
+    plan: free
+    buildCommand: npm run install:all && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 22.23.4
+      - key: PORT
+        value: 5000
+      - key: GEMINI_API_KEY
+        sync: false
