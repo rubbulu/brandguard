@@ -270,14 +270,21 @@ app.post("/api/review", async (req, res) => {
     }
 
     // Call Gemini with cascading fallback
-    let rawAiFindings;
+    let rawAiFindings = [];
+    let modelUsed = ACTIVE_MODEL;
     try {
-      rawAiFindings = await callGeminiReview({
+      const reviewResult = await callGeminiReview({
         apiKey: GEMINI_API_KEY,
         draftText: textToReview,
         rules: req.workspace.rules,
         facts: req.workspace.facts
       });
+      if (Array.isArray(reviewResult)) {
+        rawAiFindings = reviewResult;
+      } else {
+        rawAiFindings = reviewResult.findings || [];
+        modelUsed = reviewResult.model || ACTIVE_MODEL;
+      }
     } catch (aiErr) {
       console.error("[Review AI Error]:", aiErr.message);
       return res.status(503).json({
@@ -314,7 +321,7 @@ app.post("/api/review", async (req, res) => {
       findings: validationResult.accepted,
       validatorRejected: validationResult.rejected,
       stats: validationResult.stats,
-      modelUsed: ACTIVE_MODEL,
+      modelUsed: modelUsed || ACTIVE_MODEL,
       updatedDraft: targetDraft
     });
   } catch (error) {
