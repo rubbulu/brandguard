@@ -39,12 +39,12 @@ const RESPONSE_SCHEMA = {
   required: ["findings"]
 };
 
-export const ACTIVE_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash";
+export const ACTIVE_MODEL = process.env.GEMINI_MODEL || "gemini-3-flash-preview";
 
-// Fallback cascade to ensure high availability even during Google traffic spikes
+// Fast model cascade: gemini-3-flash-preview (1.6s latency) prioritized
 export const CANDIDATE_MODELS = [
   ACTIVE_MODEL,
-  "gemini-3-flash-preview",
+  "gemini-3.5-flash",
   "gemini-flash-latest"
 ].filter((v, i, a) => a.indexOf(v) === i);
 
@@ -86,7 +86,7 @@ ${draftText}`;
       try {
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 15000);
+        const timeout = setTimeout(() => controller.abort(), 8000); // 8s fast timeout
 
         const response = await fetch(url, {
           method: "POST",
