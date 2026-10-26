@@ -4,8 +4,9 @@ import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
 import { INITIAL_RULES, INITIAL_FACTS, SAMPLE_DRAFTS } from "./demoData.js";
-import { callGeminiReview } from "./geminiService.js";
+import { callGeminiReview, ACTIVE_MODEL } from "./geminiService.js";
 import { validateFindings } from "./validator.js";
+import { loadWorkspace, saveWorkspace, resetWorkspace } from "./workspaceStore.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -24,153 +25,171 @@ app.use(express.json());
 const clientDist = path.join(__dirname, "../client/dist");
 app.use(express.static(clientDist));
 
-// In-Memory Data Store (with persistence within process & instant reset capability)
-let rules = [...INITIAL_RULES];
-let facts = [...INITIAL_FACTS];
-let drafts = [
-  {
-    id: "draft-demo-1",
-    title: "CampusPro Launch Announcement",
-    channel: "Social Media / Twitter",
-    creator: "Mohammad Rubina Sultana",
-    createdAt: new Date().toISOString(),
-    status: "reviewed", // submitted, reviewed, pending_reviewer, approved, changes_requested
-    originalText: "Meet CampusPro, India's fastest laptop for students! Its battery lasts 3 days. Buy now!!",
-    currentText: "Meet CampusPro, a laptop for students! Its battery lasts up to 12 hours. Buy now!",
-    version: 1,
-    findings: [
-      {
-        id: "finding-demo-1",
-        rule_id: "R-12",
-        category: "claim",
-        severity: "high",
-        quote: "India's fastest laptop",
-        explanation: "Superlative claim without backing by an approved benchmark or fact.",
-        suggested_fix: "a laptop",
-        needs_human_judgement: false,
-        status: "accepted"
-      },
-      {
-        id: "finding-demo-2",
-        rule_id: "F-01",
-        category: "fact",
-        severity: "high",
-        quote: "battery lasts 3 days",
-        explanation: "Conflicts with approved fact F-01 (CampusPro battery lasts up to 12 hours).",
-        suggested_fix: "battery lasts up to 12 hours",
-        needs_human_judgement: false,
-        status: "accepted"
-      },
-      {
-        id: "finding-demo-3",
-        rule_id: "T-03",
-        category: "tone",
-        severity: "low",
-        quote: "Buy now!!",
-        explanation: "More than one exclamation mark violates tone policy T-03.",
-        suggested_fix: "Buy now!",
-        needs_human_judgement: false,
-        status: "accepted"
-      }
-    ],
-    validatorRejected: [],
-    history: [
-      { timestamp: new Date(Date.now() - 3600000).toISOString(), actor: "Creator", action: "Draft submitted (v1)" },
-      { timestamp: new Date(Date.now() - 3500000).toISOString(), actor: "BrandGuard AI", action: "AI Review completed (3 findings detected, 0 rejected by validator)" },
-      { timestamp: new Date(Date.now() - 3000000).toISOString(), actor: "Creator", action: "Accepted suggested fixes for R-12, F-01, and T-03" }
-    ],
-    comments: [
-      {
-        id: "c-1",
-        author: "Brand Manager",
-        role: "reviewer",
-        text: "Please double check with engineering if the 12-hour battery benchmark was lab tested.",
-        timestamp: new Date(Date.now() - 1800000).toISOString()
-      }
-    ]
-  }
-];
+// --- Rate Limiting per Workspace (10 reviews per minute) ---
+const reviewRateLimits = new Map(); // workspaceId -> array of timestamps
 
-// --- 1. Health Check ---
+function checkRateLimit(workspaceId) {
+  const now = Date.now();
+  const windowMs = 60 * 1000;
+  const maxRequests = 10;
+
+  const timestamps = (reviewRateLimits.get(workspaceId) || []).filter(ts => now - ts < windowMs);
+  if (timestamps.length >= maxRequests) {
+    return false;
+  }
+  timestamps.push(now);
+  reviewRateLimits.set(workspaceId, timestamps);
+  return true;
+}
+
+// --- Workspace Middleware ---
+app.use("/api", (req, res, next) => {
+  const workspaceId = req.headers["x-workspace-id"] || req.query.workspaceId || "default";
+  req.workspaceId = typeof workspaceId === "string" ? workspaceId : "default";
+  req.workspace = loadWorkspace(req.workspaceId);
+  req.saveWs = () => saveWorkspace(req.workspaceId, req.workspace);
+  next();
+});
+
+// --- 1. Health Check & Config ---
 app.get("/api/health", (req, res) => {
   res.json({
     status: "connected",
     service: "BrandGuard Governance Engine",
-    version: "2.0.0",
+    version: "2.1.0",
     geminiKeyConfigured: Boolean(GEMINI_API_KEY),
+    modelName: ACTIVE_MODEL,
+    workspaceId: req.workspaceId,
     timestamp: new Date().toISOString()
   });
 });
 
 // --- 2. Rules Library ---
 app.get("/api/rules", (req, res) => {
-  res.json(rules);
+  res.json(req.workspace.rules);
 });
 
 app.post("/api/rules", (req, res) => {
   const { id, category, text, severity } = req.body;
   if (!id || !text) {
-    return res.status(400).json({ error: "Rule ID and text are required" });
+    return res.status(400).json({ error: "Rule ID and policy text are required." });
   }
+
   const cleanId = id.trim().toUpperCase();
-  const existing = rules.find(r => r.id === cleanId);
-  if (existing) {
-    existing.category = category || existing.category;
-    existing.text = text;
-    existing.severity = severity || existing.severity;
-    return res.json({ message: "Rule updated", rule: existing });
+  // Validate ID format: must start with R- or T- (e.g. R-12, T-03)
+  if (!/^[RT]-\d+$/.test(cleanId)) {
+    return res.status(400).json({
+      error: `Invalid Rule ID format "${cleanId}". Rule IDs must start with 'R-' (for rules) or 'T-' (for tone), followed by digits (e.g. R-25, T-04).`
+    });
   }
+
+  // Check for duplicate ID
+  const existing = req.workspace.rules.find(r => r.id === cleanId);
+  if (existing) {
+    return res.status(400).json({
+      error: `Rule ID "${cleanId}" already exists. Please choose a unique ID or use Edit.`
+    });
+  }
+
   const newRule = {
     id: cleanId,
     category: (category || "claim").toLowerCase(),
-    text,
-    severity: (severity || "medium").toLowerCase()
+    text: text.trim(),
+    severity: ["high", "medium", "low"].includes((severity || "").toLowerCase())
+      ? severity.toLowerCase()
+      : "medium"
   };
-  rules.push(newRule);
+
+  req.workspace.rules.push(newRule);
+  req.saveWs();
   res.status(201).json(newRule);
+});
+
+app.put("/api/rules/:id", (req, res) => {
+  const ruleId = req.params.id.toUpperCase();
+  const { category, text, severity } = req.body;
+
+  const rule = req.workspace.rules.find(r => r.id === ruleId);
+  if (!rule) {
+    return res.status(404).json({ error: `Rule "${ruleId}" not found.` });
+  }
+
+  if (category) rule.category = category.toLowerCase();
+  if (text) rule.text = text.trim();
+  if (severity && ["high", "medium", "low"].includes(severity.toLowerCase())) {
+    rule.severity = severity.toLowerCase();
+  }
+
+  req.saveWs();
+  res.json({ message: "Rule updated successfully", rule });
 });
 
 app.delete("/api/rules/:id", (req, res) => {
   const ruleId = req.params.id.toUpperCase();
-  rules = rules.filter(r => r.id !== ruleId);
-  res.json({ message: `Rule ${ruleId} deleted`, rules });
+  req.workspace.rules = req.workspace.rules.filter(r => r.id !== ruleId);
+  req.saveWs();
+  res.json({ message: `Rule ${ruleId} deleted`, rules: req.workspace.rules });
 });
 
 // --- 3. Approved Facts Library ---
 app.get("/api/facts", (req, res) => {
-  res.json(facts);
+  res.json(req.workspace.facts);
 });
 
 app.post("/api/facts", (req, res) => {
   const { id, text } = req.body;
   if (!id || !text) {
-    return res.status(400).json({ error: "Fact ID and text are required" });
+    return res.status(400).json({ error: "Fact ID and specification text are required." });
   }
+
   const cleanId = id.trim().toUpperCase();
-  const existing = facts.find(f => f.id === cleanId);
-  if (existing) {
-    existing.text = text;
-    return res.json({ message: "Fact updated", fact: existing });
+  // Validate ID format: must start with F- (e.g. F-05)
+  if (!/^F-\d+$/.test(cleanId)) {
+    return res.status(400).json({
+      error: `Invalid Fact ID format "${cleanId}". Fact IDs must start with 'F-' followed by digits (e.g. F-05).`
+    });
   }
-  const newFact = { id: cleanId, text };
-  facts.push(newFact);
+
+  const existing = req.workspace.facts.find(f => f.id === cleanId);
+  if (existing) {
+    return res.status(400).json({
+      error: `Fact ID "${cleanId}" already exists. Please choose a unique ID or use Edit.`
+    });
+  }
+
+  const newFact = { id: cleanId, text: text.trim() };
+  req.workspace.facts.push(newFact);
+  req.saveWs();
   res.status(201).json(newFact);
+});
+
+app.put("/api/facts/:id", (req, res) => {
+  const factId = req.params.id.toUpperCase();
+  const { text } = req.body;
+
+  const fact = req.workspace.facts.find(f => f.id === factId);
+  if (!fact) {
+    return res.status(404).json({ error: `Fact "${factId}" not found.` });
+  }
+
+  if (text) fact.text = text.trim();
+  req.saveWs();
+  res.json({ message: "Fact updated successfully", fact });
 });
 
 app.delete("/api/facts/:id", (req, res) => {
   const factId = req.params.id.toUpperCase();
-  facts = facts.filter(f => f.id !== factId);
-  res.json({ message: `Fact ${factId} deleted`, facts });
+  req.workspace.facts = req.workspace.facts.filter(f => f.id !== factId);
+  req.saveWs();
+  res.json({ message: `Fact ${factId} deleted`, facts: req.workspace.facts });
 });
 
-// --- 4. Reset & Load Demo Data ---
-app.post("/api/reset-demo", (req, res) => {
-  rules = [...INITIAL_RULES];
-  facts = [...INITIAL_FACTS];
+// --- 4. Workspace Reset & Sample Drafts ---
+app.post("/api/reset-workspace", (req, res) => {
+  const fresh = resetWorkspace(req.workspaceId);
   res.json({
-    message: "Reset to default BrandGuard guidelines and approved facts",
-    rules,
-    facts,
+    message: "Workspace successfully reset to clean initial state.",
+    workspace: fresh,
     sampleDrafts: SAMPLE_DRAFTS
   });
 });
@@ -179,25 +198,26 @@ app.get("/api/sample-drafts", (req, res) => {
   res.json(SAMPLE_DRAFTS);
 });
 
-// --- 5. Draft Management ---
+// --- 5. Drafts Management ---
 app.get("/api/drafts", (req, res) => {
-  res.json(drafts);
+  res.json(req.workspace.drafts);
 });
 
 app.get("/api/drafts/:id", (req, res) => {
-  const draft = drafts.find(d => d.id === req.params.id);
-  if (!draft) return res.status(404).json({ error: "Draft not found" });
+  const draft = req.workspace.drafts.find(d => d.id === req.params.id);
+  if (!draft) return res.status(404).json({ error: "Draft not found." });
   res.json(draft);
 });
 
 app.post("/api/drafts", (req, res) => {
   const { title, channel, content, creator } = req.body;
-  if (!content) {
-    return res.status(400).json({ error: "Content is required" });
+  if (!content || content.trim() === "") {
+    return res.status(400).json({ error: "Content is required." });
   }
+
   const newDraft = {
     id: `draft-${Date.now()}`,
-    title: title || "Untitled Draft",
+    title: title?.trim() || "Untitled Draft",
     channel: channel || "Web / Campaign",
     creator: creator || "Creator",
     createdAt: new Date().toISOString(),
@@ -208,58 +228,84 @@ app.post("/api/drafts", (req, res) => {
     findings: [],
     validatorRejected: [],
     history: [
-      { timestamp: new Date().toISOString(), actor: creator || "Creator", action: "Draft submitted (v1)" }
+      {
+        id: `h-${Date.now()}-1`,
+        timestamp: new Date().toISOString(),
+        actor: creator || "Creator",
+        action: "Draft submitted (v1)"
+      }
     ],
     comments: []
   };
-  drafts.unshift(newDraft);
+
+  req.workspace.drafts.unshift(newDraft);
+  req.saveWs();
   res.status(201).json(newDraft);
 });
 
-// --- 6. AI Review Endpoint with Validator Engine ---
+// --- 6. AI Review Endpoint with Validator Engine & Rate Limiting ---
 app.post("/api/review", async (req, res) => {
   try {
     const { draftId, draftText } = req.body;
-    let targetDraft = null;
 
+    // Enforce rate limit per workspace
+    if (!checkRateLimit(req.workspaceId)) {
+      return res.status(429).json({
+        error: "Rate limit reached (10 checks per minute). Please wait a moment before running another check."
+      });
+    }
+
+    let targetDraft = null;
     let textToReview = draftText;
+
     if (draftId) {
-      targetDraft = drafts.find(d => d.id === draftId);
+      targetDraft = req.workspace.drafts.find(d => d.id === draftId);
       if (targetDraft) {
         textToReview = targetDraft.currentText || targetDraft.originalText;
       }
     }
 
     if (!textToReview || textToReview.trim() === "") {
-      return res.status(400).json({ error: "Draft text is empty" });
+      return res.status(400).json({ error: "Draft text is empty." });
     }
 
-    console.log(`[Review] Starting AI review on ${textToReview.length} chars...`);
+    // Call Gemini with cascading fallback
+    let rawAiFindings;
+    try {
+      rawAiFindings = await callGeminiReview({
+        apiKey: GEMINI_API_KEY,
+        draftText: textToReview,
+        rules: req.workspace.rules,
+        facts: req.workspace.facts
+      });
+    } catch (aiErr) {
+      console.error("[Review AI Error]:", aiErr.message);
+      return res.status(503).json({
+        error: "The AI is busy, please try again in a minute.",
+        details: aiErr.message
+      });
+    }
 
-    // 1. Call Gemini with strict system prompt & JSON schema
-    const rawAiFindings = await callGeminiReview({
-      apiKey: GEMINI_API_KEY,
-      draftText: textToReview,
-      rules,
-      facts
-    });
+    // Run the deterministic Validator
+    const validationResult = validateFindings(
+      textToReview,
+      rawAiFindings,
+      req.workspace.rules,
+      req.workspace.facts
+    );
 
-    console.log(`[Review] Gemini returned ${rawAiFindings.length} raw findings.`);
-
-    // 2. Pass findings through the Validator
-    const validationResult = validateFindings(textToReview, rawAiFindings, rules, facts);
-    console.log(`[Review] Validator: Accepted ${validationResult.accepted.length}, Rejected ${validationResult.rejected.length}`);
-
-    // 3. Persist on draft if draftId provided
+    // Persist on draft if applicable
     if (targetDraft) {
       targetDraft.status = "reviewed";
       targetDraft.findings = validationResult.accepted;
       targetDraft.validatorRejected = validationResult.rejected;
       targetDraft.history.push({
+        id: `h-${Date.now()}`,
         timestamp: new Date().toISOString(),
         actor: "BrandGuard AI",
-        action: `Review complete: ${validationResult.accepted.length} accepted, ${validationResult.rejected.length} dropped by validator`
+        action: `AI Review completed (${validationResult.accepted.length} valid findings kept, ${validationResult.rejected.length} dropped by validator)`
       });
+      req.saveWs();
     }
 
     res.json({
@@ -268,157 +314,251 @@ app.post("/api/review", async (req, res) => {
       findings: validationResult.accepted,
       validatorRejected: validationResult.rejected,
       stats: validationResult.stats,
+      modelUsed: ACTIVE_MODEL,
       updatedDraft: targetDraft
     });
   } catch (error) {
-    console.error("[Review Error]:", error);
+    console.error("[Review Fatal Error]:", error);
     res.status(500).json({
-      error: error.message || "Failed to complete AI review",
-      details: "Ensure GEMINI_API_KEY is valid and network connectivity is active."
+      error: "An unexpected error occurred during review. Please try again."
     });
   }
 });
 
-// --- 7. Applying Finding Actions (Accept, Edit, Reject) ---
+// Helper: Recompute currentText from originalText and active accepted/edited findings
+function recomputeDraftText(originalText, findings) {
+  let text = originalText;
+  for (const f of findings) {
+    if ((f.status === "accepted" || f.status === "edited") && f.suggested_fix) {
+      if (text.includes(f.quote)) {
+        text = text.replace(f.quote, f.suggested_fix);
+      }
+    }
+  }
+  return text;
+}
+
+// --- 7. Applying Finding Actions (Accept, Edit, Reject, Undo) ---
 app.patch("/api/drafts/:id/finding", (req, res) => {
   const { id } = req.params;
-  const { findingId, action, customFix } = req.body; // action: 'accept' | 'edit' | 'reject'
+  const { findingId, action, customFix } = req.body; // action: 'accept' | 'edit' | 'reject' | 'undo'
 
-  const draft = drafts.find(d => d.id === id);
-  if (!draft) return res.status(404).json({ error: "Draft not found" });
+  const draft = req.workspace.drafts.find(d => d.id === id);
+  if (!draft) return res.status(404).json({ error: "Draft not found." });
 
   const finding = draft.findings.find(f => f.id === findingId);
-  if (!finding) return res.status(404).json({ error: "Finding not found" });
+  if (!finding) return res.status(404).json({ error: "Finding not found." });
+
+  const prevStatus = finding.status || "pending";
 
   if (action === "accept") {
     finding.status = "accepted";
-    // Replace quote in current text
-    if (draft.currentText.includes(finding.quote)) {
-      draft.currentText = draft.currentText.replace(finding.quote, finding.suggested_fix);
-    }
+    draft.currentText = recomputeDraftText(draft.originalText, draft.findings);
     draft.history.push({
+      id: `h-${Date.now()}`,
       timestamp: new Date().toISOString(),
       actor: "Creator",
-      action: `Accepted fix for ${finding.rule_id}: replaced "${finding.quote}" with "${finding.suggested_fix}"`
+      action: `Accepted suggested fix for ${finding.rule_id}: replaced "${finding.quote}" with "${finding.suggested_fix}"`
     });
   } else if (action === "edit") {
     finding.status = "edited";
-    const newFix = customFix || finding.suggested_fix;
-    if (draft.currentText.includes(finding.quote)) {
-      draft.currentText = draft.currentText.replace(finding.quote, newFix);
-    }
-    finding.suggested_fix = newFix;
+    finding.suggested_fix = (customFix || finding.suggested_fix).trim();
+    draft.currentText = recomputeDraftText(draft.originalText, draft.findings);
     draft.history.push({
+      id: `h-${Date.now()}`,
       timestamp: new Date().toISOString(),
       actor: "Creator",
-      action: `Custom edit for ${finding.rule_id}: replaced "${finding.quote}" with "${newFix}"`
+      action: `Edited and applied fix for ${finding.rule_id}: replaced "${finding.quote}" with "${finding.suggested_fix}"`
     });
   } else if (action === "reject") {
     finding.status = "rejected";
+    draft.currentText = recomputeDraftText(draft.originalText, draft.findings);
     draft.history.push({
+      id: `h-${Date.now()}`,
       timestamp: new Date().toISOString(),
       actor: "Creator",
       action: `Rejected finding for ${finding.rule_id} ("${finding.quote}")`
     });
+  } else if (action === "undo") {
+    finding.status = "pending";
+    draft.currentText = recomputeDraftText(draft.originalText, draft.findings);
+    draft.history.push({
+      id: `h-${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      actor: "Creator",
+      action: `Reverted decision on ${finding.rule_id} ("${finding.quote}") back to pending`
+    });
+  } else {
+    return res.status(400).json({ error: `Unknown action "${action}". Allowed: accept, edit, reject, undo.` });
   }
 
+  req.saveWs();
   res.json({ draft, finding });
 });
 
 // --- 8. Reviewer Decisions & Comments ---
 app.post("/api/drafts/:id/decision", (req, res) => {
   const { id } = req.params;
-  const { decision, comment, reviewerName } = req.body; // decision: 'approve' | 'request_changes'
+  const { decision, comment, reviewerName } = req.body; // decision: 'approve' | 'request_changes' | 'submit_for_review' | 'save_note'
 
-  const draft = drafts.find(d => d.id === id);
-  if (!draft) return res.status(404).json({ error: "Draft not found" });
+  const draft = req.workspace.drafts.find(d => d.id === id);
+  if (!draft) return res.status(404).json({ error: "Draft not found." });
 
+  const author = reviewerName || "Reviewer";
+
+  // If a note/comment was provided
   if (comment && comment.trim() !== "") {
-    draft.comments.push({
+    const newComment = {
       id: `c-${Date.now()}`,
-      author: reviewerName || "Reviewer",
+      author,
       role: "reviewer",
       text: comment.trim(),
       timestamp: new Date().toISOString()
-    });
+    };
+    draft.comments.push(newComment);
+
+    if (decision === "save_note") {
+      draft.history.push({
+        id: `h-${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        actor: author,
+        action: `Added reviewer note: "${comment.trim()}"`
+      });
+      req.saveWs();
+      return res.json(draft);
+    }
   }
 
   if (decision === "approve") {
     draft.status = "approved";
+    const noteSnippet = comment ? ` with note: "${comment.trim()}"` : "";
     draft.history.push({
+      id: `h-${Date.now()}`,
       timestamp: new Date().toISOString(),
-      actor: reviewerName || "Reviewer",
-      action: "Draft officially approved for publication"
+      actor: author,
+      action: `Approved draft for publication${noteSnippet}`
     });
   } else if (decision === "request_changes") {
     draft.status = "changes_requested";
+    const noteSnippet = comment ? ` with note: "${comment.trim()}"` : "";
     draft.history.push({
+      id: `h-${Date.now()}`,
       timestamp: new Date().toISOString(),
-      actor: reviewerName || "Reviewer",
-      action: "Changes requested by reviewer"
+      actor: author,
+      action: `Requested revisions${noteSnippet}`
     });
   } else if (decision === "submit_for_review") {
     draft.status = "pending_reviewer";
     draft.history.push({
+      id: `h-${Date.now()}`,
       timestamp: new Date().toISOString(),
       actor: "Creator",
-      action: "Draft submitted for final reviewer sign-off"
+      action: "Submitted draft for final reviewer sign-off"
     });
+  } else if (decision !== "save_note") {
+    return res.status(400).json({ error: `Unknown decision "${decision}".` });
   }
 
+  req.saveWs();
   res.json(draft);
 });
 
-// --- 9. Insights Dashboard (Round 3 Feature Preview) ---
+// --- 9. Real Governance Insights (Strictly from Stored Data) ---
 app.get("/api/insights", (req, res) => {
-  // Aggregate stats from drafts and findings
-  const ruleCounts = {};
+  const drafts = req.workspace.drafts || [];
+  const rules = req.workspace.rules || [];
+  const facts = req.workspace.facts || [];
+
+  const ruleMap = new Map();
+  rules.forEach(r => ruleMap.set(r.id, r.text));
+  facts.forEach(f => ruleMap.set(f.id, f.text));
+
+  const ruleStats = {}; // rule_id -> { totalFlagged, accepted, edited, rejected }
   let totalFindings = 0;
   let totalAccepted = 0;
-  let totalRejectedFindings = 0;
+  let totalEdited = 0;
+  let totalRejected = 0;
   let totalValidatorDropped = 0;
 
   for (const draft of drafts) {
-    if (draft.findings) {
+    if (Array.isArray(draft.findings)) {
       for (const f of draft.findings) {
         totalFindings++;
-        ruleCounts[f.rule_id] = (ruleCounts[f.rule_id] || 0) + 1;
-        if (f.status === "accepted" || f.status === "edited") totalAccepted++;
-        if (f.status === "rejected") totalRejectedFindings++;
+        if (!ruleStats[f.rule_id]) {
+          ruleStats[f.rule_id] = { totalFlagged: 0, accepted: 0, edited: 0, rejected: 0 };
+        }
+        ruleStats[f.rule_id].totalFlagged++;
+
+        if (f.status === "accepted") {
+          totalAccepted++;
+          ruleStats[f.rule_id].accepted++;
+        } else if (f.status === "edited") {
+          totalEdited++;
+          ruleStats[f.rule_id].edited++;
+        } else if (f.status === "rejected") {
+          totalRejected++;
+          ruleStats[f.rule_id].rejected++;
+        }
       }
     }
-    if (draft.validatorRejected) {
+    if (Array.isArray(draft.validatorRejected)) {
       totalValidatorDropped += draft.validatorRejected.length;
     }
   }
 
-  // Top broken rules
-  const topRules = Object.entries(ruleCounts)
-    .map(([rule_id, count]) => ({ rule_id, count }))
+  // Top violated rules by count
+  const topRules = Object.entries(ruleStats)
+    .map(([rule_id, stats]) => ({
+      rule_id,
+      count: stats.totalFlagged,
+      rule_text: ruleMap.get(rule_id) || "Custom Rule or Fact"
+    }))
     .sort((a, b) => b.count - a.count)
     .slice(0, 5);
 
-  // Unclear guideline detection: if a rule is repeatedly rejected by creators
-  const unclearRules = [];
-  if (ruleCounts["R-12"] && ruleCounts["R-12"] >= 1) {
-    unclearRules.push({
-      rule_id: "R-12",
-      title: "Superlative Claims",
-      reason: "High violation volume (frequently flagged across creator drafts). Suggest specifying explicit benchmark criteria."
-    });
+  // Honest, rule-based Unclear Guideline Detection:
+  // Flag ONLY when flagged >= 3 times AND >= 40% of decisions were edited or rejected
+  const unclearGuidelines = [];
+  for (const [rule_id, stats] of Object.entries(ruleStats)) {
+    if (stats.totalFlagged >= 3) {
+      const decidedCount = stats.accepted + stats.edited + stats.rejected;
+      if (decidedCount >= 1) {
+        const disputeCount = stats.edited + stats.rejected;
+        const disputeRate = disputeCount / decidedCount;
+        if (disputeRate >= 0.4) {
+          unclearGuidelines.push({
+            rule_id,
+            rule_text: ruleMap.get(rule_id) || "Guideline text",
+            totalFlagged: stats.totalFlagged,
+            decidedCount,
+            disputeCount,
+            disputePercentage: Math.round(disputeRate * 100),
+            reason: `Flagged ${stats.totalFlagged} times with ${Math.round(disputeRate * 100)}% dispute rate (${disputeCount} of ${decidedCount} decisions rejected or edited). Creators frequently encounter ambiguity with this policy.`
+          });
+        }
+      }
+    }
   }
 
+  const totalDecisions = totalAccepted + totalEdited + totalRejected;
+  const fixAcceptanceRate = totalDecisions > 0
+    ? Math.round((totalAccepted / totalDecisions) * 100)
+    : null;
+
   res.json({
-    totalDrafts: drafts.length,
-    totalFindings,
-    totalAccepted,
-    totalRejectedFindings,
-    totalValidatorDropped,
+    draftsAnalysed: drafts.length,
+    findingsFlagged: totalFindings,
+    findingsAccepted: totalAccepted,
+    findingsEdited: totalEdited,
+    findingsRejected: totalRejected,
+    totalDecisions,
+    fixAcceptanceRate,
+    validatorStats: {
+      validKept: totalFindings,
+      dropped: totalValidatorDropped
+    },
     topRules,
-    unclearRules,
-    reliabilityRate: totalFindings + totalValidatorDropped > 0
-      ? `${Math.round((totalFindings / (totalFindings + totalValidatorDropped)) * 100)}%`
-      : "100%"
+    unclearGuidelines
   });
 });
 
@@ -433,4 +573,5 @@ app.get("*", (req, res, next) => {
 app.listen(PORT, () => {
   console.log(`[BrandGuard Server] Running on http://localhost:${PORT}`);
   console.log(`[BrandGuard Server] Gemini API Key configured: ${Boolean(GEMINI_API_KEY)}`);
+  console.log(`[BrandGuard Server] Active Model: ${ACTIVE_MODEL}`);
 });

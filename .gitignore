@@ -20,6 +20,11 @@ yarn-debug.log*
 yarn-error.log*
 *.log
 
+# Workspace data
+server/data/workspaces/*.json
+scratch/
+page_*.png
+
 # OS & Editor files
 .DS_Store
 Thumbs.db

@@ -39,12 +39,14 @@ const RESPONSE_SCHEMA = {
   required: ["findings"]
 };
 
+export const ACTIVE_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash";
+
 // Fallback cascade to ensure high availability even during Google traffic spikes
-const CANDIDATE_MODELS = [
-  "gemini-3.5-flash",
+export const CANDIDATE_MODELS = [
+  ACTIVE_MODEL,
   "gemini-3-flash-preview",
   "gemini-flash-latest"
-];
+].filter((v, i, a) => a.indexOf(v) === i);
 
 export async function callGeminiReview({ apiKey, draftText, rules, facts }) {
   if (!apiKey) {
