@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import {
   Shield,
+  ShieldCheck,
   CheckCircle2,
   AlertTriangle,
   XCircle,
@@ -29,6 +30,9 @@ import {
   Upload,
   Trash2
 } from "lucide-react";
+import RedlineDiff from "./components/RedlineDiff";
+import ComplianceCertificate from "./components/ComplianceCertificate";
+import PublicVerifyPage from "./components/PublicVerifyPage";
 
 // Get or initialize persistent Workspace ID for this browser visitor
 function getOrCreateWorkspaceId() {
@@ -48,6 +52,20 @@ export default function App() {
     const hash = window.location.hash.replace("#/", "");
     return ["manager", "creator", "reviewer", "insights"].includes(hash) ? hash : "creator";
   });
+
+  // Certificate & Verification State
+  const [verifyCertId, setVerifyCertId] = useState(() => {
+    const pathname = window.location.pathname;
+    if (pathname.startsWith("/verify/")) {
+      return pathname.replace("/verify/", "").trim();
+    }
+    const hash = window.location.hash;
+    if (hash.startsWith("#/verify/")) {
+      return hash.replace("#/verify/", "").trim();
+    }
+    return null;
+  });
+  const [viewingCertificateDraft, setViewingCertificateDraft] = useState(null);
 
   // Creator Mode Toggle: "text" | "visual"
   const [creatorMode, setCreatorMode] = useState("text");
@@ -149,19 +167,33 @@ export default function App() {
     return fetch(url, { ...options, headers });
   };
 
-  // 1. Hash Routing Sync
+  // 1. Hash & Path Routing Sync
   useEffect(() => {
-    const handleHashChange = () => {
+    const handleUrlChange = () => {
+      const pathname = window.location.pathname;
+      if (pathname.startsWith("/verify/")) {
+        setVerifyCertId(pathname.replace("/verify/", "").trim());
+        return;
+      }
       const hash = window.location.hash.replace("#/", "");
+      if (hash.startsWith("verify/")) {
+        setVerifyCertId(hash.replace("verify/", "").trim());
+        return;
+      }
+      setVerifyCertId(null);
       if (["manager", "creator", "reviewer", "insights"].includes(hash)) {
         setActiveRole(hash);
       }
     };
-    window.addEventListener("hashchange", handleHashChange);
-    if (!window.location.hash) {
+    window.addEventListener("hashchange", handleUrlChange);
+    window.addEventListener("popstate", handleUrlChange);
+    if (!window.location.hash && !window.location.pathname.startsWith("/verify/")) {
       window.location.hash = "#/creator";
     }
-    return () => window.removeEventListener("hashchange", handleHashChange);
+    return () => {
+      window.removeEventListener("hashchange", handleUrlChange);
+      window.removeEventListener("popstate", handleUrlChange);
+    };
   }, []);
 
   const changeRole = (role) => {
@@ -654,11 +686,12 @@ export default function App() {
         setActiveDraft(updated);
         setReviewerComment("");
         await loadWorkspaceData();
-        showNotice(
-          decision === "approve"
-            ? "Draft approved for publication. Audit trail recorded."
-            : "Revisions requested. Returned to creator queue."
-        );
+        if (decision === "approve") {
+          setViewingCertificateDraft(updated);
+          showNotice(`Draft approved for publication! Tamper-evident compliance certificate generated (${updated.certificate?.certificateId || ""}).`);
+        } else {
+          showNotice("Revisions requested. Returned to creator queue.");
+        }
       }
     } catch (e) {
       console.error(e);
@@ -1161,6 +1194,18 @@ export default function App() {
             );
           })}
         </div>
+
+        {/* Word-Level Redline Diff for Visual Banner Copy */}
+        <div className="pt-2 border-t border-slate-100">
+          <RedlineDiff
+            originalText={draft.originalText}
+            finalText={draft.currentText}
+            findings={draft.findings}
+            title="Redline Copy Diff for Designer"
+            defaultMode="inline"
+            showToggle={true}
+          />
+        </div>
       </div>
     );
   };
@@ -1226,6 +1271,18 @@ export default function App() {
       </div>
     );
   };
+
+  if (verifyCertId) {
+    return (
+      <PublicVerifyPage
+        certificateId={verifyCertId}
+        onBack={() => {
+          setVerifyCertId(null);
+          window.history.pushState(null, "", "/#/creator");
+        }}
+      />
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col font-sans antialiased">
@@ -2279,6 +2336,16 @@ export default function App() {
                             {activeDraft.currentText}
                           </p>
                         </div>
+
+                        {/* Word-Level Redline Diff */}
+                        <RedlineDiff
+                          originalText={activeDraft.originalText}
+                          finalText={activeDraft.currentText}
+                          findings={activeDraft.findings}
+                          title="Word-Level Redline Diff (Original vs Proposed Final Copy)"
+                          defaultMode="inline"
+                          showToggle={true}
+                        />
                       </div>
                     )}
 
@@ -2383,17 +2450,28 @@ export default function App() {
                   </div>
 
                   {/* Submission to Reviewer Action */}
-                  <div className="mt-6 pt-4 border-t border-slate-100 flex items-center justify-between">
+                  <div className="mt-6 pt-4 border-t border-slate-100 flex flex-wrap items-center justify-between gap-3">
                     <span className="text-xs text-slate-500">
                       Send finalized draft with your accepted fixes to reviewer.
                     </span>
-                    <button
-                      onClick={handleSubmitToReviewer}
-                      disabled={isVisualAuditing || isReviewing}
-                      className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-50"
-                    >
-                      <Send className="w-3.5 h-3.5" /> Submit to Reviewer
-                    </button>
+                    <div className="flex items-center gap-2">
+                      {activeDraft.certificate && (
+                        <button
+                          type="button"
+                          onClick={() => setViewingCertificateDraft(activeDraft)}
+                          className="px-3.5 py-2 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 border border-emerald-300 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs"
+                        >
+                          <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" /> View Compliance Certificate
+                        </button>
+                      )}
+                      <button
+                        onClick={handleSubmitToReviewer}
+                        disabled={isVisualAuditing || isReviewing}
+                        className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-50"
+                      >
+                        <Send className="w-3.5 h-3.5" /> Submit to Reviewer
+                      </button>
+                    </div>
                   </div>
                 </div>
 
@@ -2800,26 +2878,15 @@ export default function App() {
                         {renderDesignFixesList(activeDraft)}
                       </div>
                     ) : (
-                      /* Before / After Text Copy Comparison */
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
-                          <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1">
-                            Original Submitted Copy
-                          </span>
-                          <p className="text-xs text-slate-600 line-through decoration-red-400 leading-relaxed whitespace-pre-wrap">
-                            {activeDraft.originalText}
-                          </p>
-                        </div>
-
-                        <div className="p-3 bg-emerald-50/50 border border-emerald-200 rounded-xl">
-                          <span className="text-[10px] font-bold text-emerald-800 uppercase tracking-wider block mb-1">
-                            Current Finalized Copy
-                          </span>
-                          <p className="text-xs font-medium text-emerald-950 leading-relaxed whitespace-pre-wrap">
-                            {activeDraft.currentText}
-                          </p>
-                        </div>
-                      </div>
+                      /* Word-Level Redline Diff in Reviewer View */
+                      <RedlineDiff
+                        originalText={activeDraft.originalText}
+                        finalText={activeDraft.currentText}
+                        findings={activeDraft.findings}
+                        title="Reviewer Redline Diff (Original vs Final Approved Copy)"
+                        defaultMode="inline"
+                        showToggle={true}
+                      />
                     )}
 
                     {/* Resolved Findings Recap */}
@@ -2883,6 +2950,37 @@ export default function App() {
                         <AlertTriangle className="w-4 h-4 text-amber-600" /> Request Revisions
                       </button>
                     </div>
+
+                    {/* Active Compliance Certificate Card */}
+                    {activeDraft.certificate && (
+                      <div className="p-3.5 bg-emerald-50/90 border border-emerald-300 rounded-xl flex items-center justify-between gap-3 shadow-xs">
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-8 h-8 rounded-lg bg-emerald-600 text-white flex items-center justify-center shadow-xs">
+                            <ShieldCheck className="w-5 h-5" />
+                          </div>
+                          <div>
+                            <span className="text-xs font-bold text-emerald-950 block flex items-center gap-1.5">
+                              Compliance Certificate Issued
+                              <span className="text-[10px] font-normal px-1.5 py-0.2 rounded-full bg-emerald-200 text-emerald-800">
+                                v{activeDraft.certificate.version}
+                              </span>
+                            </span>
+                            <span className="text-[11px] font-mono text-emerald-700 block truncate max-w-[200px] sm:max-w-xs">
+                              {activeDraft.certificate.certificateId}
+                            </span>
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => setViewingCertificateDraft(activeDraft)}
+                          className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 transition shadow"
+                        >
+                          <FileText className="w-3.5 h-3.5" />
+                          <span>View Certificate</span>
+                        </button>
+                      </div>
+                    )}
 
                     {/* Real Audit Trail / Revision History */}
                     <div className="pt-3 border-t border-slate-100">
@@ -3125,6 +3223,22 @@ export default function App() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Compliance Certificate Modal */}
+      {viewingCertificateDraft && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm overflow-y-auto p-4 sm:p-6 flex items-start justify-center">
+          <ComplianceCertificate
+            draft={viewingCertificateDraft}
+            certificate={viewingCertificateDraft.certificate}
+            onClose={() => setViewingCertificateDraft(null)}
+            onOpenVerify={(id) => {
+              setViewingCertificateDraft(null);
+              setVerifyCertId(id);
+              window.history.pushState(null, "", `/verify/${id}`);
+            }}
+          />
         </div>
       )}
 

@@ -9,6 +9,13 @@ import { validateFindings } from "./validator.js";
 import { loadWorkspace, saveWorkspace, resetWorkspace } from "./workspaceStore.js";
 import { runVisualAudit } from "./visualAuditor.js";
 import { detectPromptInjection } from "./securityScanner.js";
+import {
+  createComplianceCertificate,
+  getCertificateById,
+  verifyCertificateIntegrity,
+  tamperWithCertificate,
+  restoreCertificate
+} from "./certificateService.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -590,6 +597,19 @@ app.patch("/api/drafts/:id/finding", (req, res) => {
 
   const prevStatus = finding.status || "pending";
 
+  // If draft was already approved, editing increments version and requires new approval
+  if (draft.status === "approved") {
+    draft.status = "in_progress";
+    draft.version = (draft.version || 1) + 1;
+    draft.history.push({
+      id: `h-${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      actor: "Creator",
+      action: `Modified draft after approval. Version bumped to v${draft.version}. Previous certificate (${draft.certificate?.certificateId}) remains valid for v${draft.version - 1}; new approval required for v${draft.version}.`
+    });
+    draft.certificate = null;
+  }
+
   if (action === "accept") {
     finding.status = "accepted";
     draft.currentText = recomputeDraftText(draft.originalText, draft.findings);
@@ -671,11 +691,26 @@ app.post("/api/drafts/:id/decision", (req, res) => {
   if (decision === "approve") {
     draft.status = "approved";
     const noteSnippet = comment ? ` with note: "${comment.trim()}"` : "";
+
+    // Generate cryptographic compliance certificate
+    const certificate = createComplianceCertificate({
+      draft,
+      workspace: req.workspace,
+      reviewerName: author,
+      reviewerNote: comment
+    });
+
+    draft.certificate = certificate;
+    if (!Array.isArray(draft.certificates)) {
+      draft.certificates = [];
+    }
+    draft.certificates.push(certificate);
+
     draft.history.push({
       id: `h-${Date.now()}`,
       timestamp: new Date().toISOString(),
       actor: author,
-      action: `Approved draft for publication${noteSnippet}`
+      action: `Approved draft for publication${noteSnippet} (Certificate ID: ${certificate.certificateId})`
     });
   } else if (decision === "request_changes") {
     draft.status = "changes_requested";
@@ -818,6 +853,63 @@ app.get("/api/insights", (req, res) => {
     },
     topRules,
     unclearGuidelines
+  });
+});
+
+// --- 10. Public Compliance Certificate & Integrity Verification Endpoints ---
+// Publicly accessible without workspace cookie or session
+app.get(["/api/verify/:certificateId", "/verify/:certificateId"], (req, res) => {
+  const { certificateId } = req.params;
+  const cert = getCertificateById(certificateId);
+
+  // If browser is requesting HTML page, serve SPA
+  if (req.headers.accept && req.headers.accept.includes("text/html")) {
+    return res.sendFile(path.join(clientDist, "index.html"), (err) => {
+      if (err) res.status(500).send("Application load error");
+    });
+  }
+
+  if (!cert) {
+    return res.status(404).json({
+      verified: false,
+      status: "NOT_FOUND",
+      error: `Certificate "${certificateId}" not found in server registry.`
+    });
+  }
+
+  const verification = verifyCertificateIntegrity(cert);
+  res.json(verification);
+});
+
+app.get("/api/certificates/:certificateId", (req, res) => {
+  const { certificateId } = req.params;
+  const cert = getCertificateById(certificateId);
+  if (!cert) return res.status(404).json({ error: "Certificate not found." });
+  res.json(cert);
+});
+
+// Demo Tamper Test endpoints
+app.post("/api/certificates/:certificateId/tamper", (req, res) => {
+  const { certificateId } = req.params;
+  const tampered = tamperWithCertificate(certificateId);
+  if (!tampered) return res.status(404).json({ error: "Certificate not found." });
+  const verification = verifyCertificateIntegrity(tampered);
+  res.json({
+    message: "Simulated tamper: 1 character modified in stored record.",
+    certificate: tampered,
+    verification
+  });
+});
+
+app.post("/api/certificates/:certificateId/restore", (req, res) => {
+  const { certificateId } = req.params;
+  const restored = restoreCertificate(certificateId);
+  if (!restored) return res.status(404).json({ error: "Certificate not found." });
+  const verification = verifyCertificateIntegrity(restored);
+  res.json({
+    message: "Restored original approved record.",
+    certificate: restored,
+    verification
   });
 });
 

@@ -138,3 +138,34 @@ code, .font-mono {
 .highlight-fact:hover {
   background-color: #ddd6fe;
 }
+
+/* Print Stylesheet for A4 Compliance Verification Certificate */
+@media print {
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+
+  .no-print, header, nav, footer, .app-header, .app-nav, button {
+    display: none !important;
+  }
+
+  .certificate-sheet {
+    box-shadow: none !important;
+    border: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    width: 100% !important;
+  }
+
+  .certificate-modal-container {
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  @page {
+    size: A4 portrait;
+    margin: 12mm 12mm 12mm 12mm;
+  }
+}
