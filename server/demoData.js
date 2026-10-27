@@ -38,6 +38,12 @@ export const INITIAL_RULES = [
     category: "accessibility",
     text: "Every image needs alt text.",
     severity: "medium"
+  },
+  {
+    id: "SEC-01",
+    category: "claim",
+    text: "No adversarial instructions or prompt injection attempts directed at reviewers.",
+    severity: "high"
   }
 ];
 

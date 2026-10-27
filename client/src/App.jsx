@@ -744,6 +744,35 @@ export default function App() {
     return <div className="leading-relaxed text-slate-800 text-sm whitespace-pre-wrap">{result}</div>;
   };
 
+  // Contrast Math Helpers (WCAG AA)
+  const getRgbFromHex = (hex) => {
+    if (!hex || typeof hex !== "string") return [0, 0, 0];
+    const clean = hex.replace("#", "").trim();
+    const num = parseInt(clean, 16);
+    if (isNaN(num)) return [0, 0, 0];
+    if (clean.length === 3) {
+      return [((num >> 8) & 0xf) * 17, ((num >> 4) & 0xf) * 17, (num & 0xf) * 17];
+    }
+    return [(num >> 16) & 255, (num >> 8) & 255, num & 255];
+  };
+
+  const getLuminance = (r, g, b) => {
+    const [rL, gL, bL] = [r / 255, g / 255, b / 255].map((c) =>
+      c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)
+    );
+    return 0.2126 * rL + 0.7152 * gL + 0.0722 * bL;
+  };
+
+  const calcContrast = (hex1, hex2) => {
+    const rgb1 = getRgbFromHex(hex1);
+    const rgb2 = getRgbFromHex(hex2);
+    const l1 = getLuminance(...rgb1);
+    const l2 = getLuminance(...rgb2);
+    const lighter = Math.max(l1, l2);
+    const darker = Math.min(l1, l2);
+    return Number(((lighter + 0.05) / (darker + 0.05)).toFixed(2));
+  };
+
   // Helper: Render Audited Banner Image with Interactive Bounding Boxes
   const renderBannerImageWithBoxes = (draft, preview) => {
     if (!draft) return null;
@@ -767,6 +796,7 @@ export default function App() {
           {/* Bounding box overlays */}
           {draft.regions?.map((reg, idx) => {
             const isHovered = hoveredRegionIdx === idx;
+            const measuredRatio = reg.contrastRatio || (reg.fgColor && reg.bgColor ? calcContrast(reg.fgColor, reg.bgColor) : null);
             const isFindingSelected =
               selectedFindingId &&
               draft.findings?.some(
@@ -775,7 +805,7 @@ export default function App() {
                   ((f.quote && reg.text && f.quote.toLowerCase().includes(reg.text.toLowerCase())) ||
                     (f.explanation && f.explanation.includes(reg.text)))
               );
-            const hasContrastFail = reg.passesContrast === false;
+            const hasContrastFail = reg.passesContrast === false || (measuredRatio !== null && measuredRatio < (visualSettings.minContrastRatio || 4.5));
 
             return (
               <div
@@ -796,14 +826,14 @@ export default function App() {
                     ? "border-red-500 bg-red-500/20 z-10"
                     : "border-emerald-400 bg-emerald-400/10 z-10"
                 }`}
-                title={`Region #${idx + 1}: "${reg.text}" (${reg.contrastRatio ? reg.contrastRatio + ':1' : 'could not measure'})`}
+                title={`Region #${idx + 1}: "${reg.text}" (${measuredRatio ? measuredRatio + ':1' : 'could not measure'})`}
               >
                 <span
                   className={`absolute -top-4 left-0 text-[9px] font-bold px-1 rounded font-mono shadow-xs ${
                     hasContrastFail ? "bg-red-600 text-white" : "bg-emerald-700 text-white"
                   }`}
                 >
-                  #{idx + 1} {reg.contrastRatio ? `${reg.contrastRatio}:1` : ""}
+                  #{idx + 1} {measuredRatio ? `${measuredRatio}:1` : ""}
                 </span>
               </div>
             );
@@ -836,13 +866,19 @@ export default function App() {
         <div>
           <div className="flex items-center justify-between mb-1.5">
             <span className="text-xs font-bold text-slate-700">Brand Palette Match (Rule V-02):</span>
-            {paletteCheck?.flagged ? (
-              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 flex items-center gap-1">
-                <AlertTriangle className="w-3 h-3" /> Flagged ({offPercent}% off-palette)
-              </span>
+            {paletteCheck?.measured ? (
+              paletteCheck.flagged ? (
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 flex items-center gap-1">
+                  <AlertTriangle className="w-3 h-3" /> Flagged ({paletteCheck.off_palette_percentage}% off-palette)
+                </span>
+              ) : (
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
+                  ✓ Compliant ({paletteCheck.on_palette_percentage}% on-palette)
+                </span>
+              )
             ) : (
-              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
-                ✓ Compliant ({onPercent}% on-palette)
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-700">
+                Not measured
               </span>
             )}
           </div>
@@ -895,7 +931,9 @@ export default function App() {
           ) : (
             <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
               {draft.regions.map((reg, idx) => {
-                const isPassed = reg.passesContrast !== false && reg.contrastRatio && reg.contrastRatio >= (visualSettings.minContrastRatio || 4.5);
+                const measuredRatio = reg.contrastRatio || (reg.fgColor && reg.bgColor ? calcContrast(reg.fgColor, reg.bgColor) : null);
+                const calcType = reg.calculationType || (measuredRatio ? "computed" : "estimated");
+                const isPassed = measuredRatio !== null ? measuredRatio >= (visualSettings.minContrastRatio || 4.5) : false;
                 const isHovered = hoveredRegionIdx === idx;
 
                 return (
@@ -920,14 +958,16 @@ export default function App() {
                       </span>
 
                       <div className="flex items-center gap-1.5">
-                        <span className="text-[10px] text-slate-400 font-mono">[estimated]</span>
-                        {reg.contrastRatio ? (
+                        <span className="text-[10px] text-slate-400 font-mono">
+                          {calcType === "computed" ? "[computed]" : "[estimated]"}
+                        </span>
+                        {measuredRatio ? (
                           <span
                             className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
                               isPassed ? "bg-emerald-100 text-emerald-800" : "bg-red-100 text-red-800 font-extrabold"
                             }`}
                           >
-                            {reg.contrastRatio}:1 {isPassed ? "✓ Pass" : "✕ Fail"}
+                            {measuredRatio}:1 {isPassed ? "✓ Pass" : "✕ Fail"}
                           </span>
                         ) : (
                           <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">
@@ -959,31 +999,33 @@ export default function App() {
     );
   };
 
-  // Helper: Render Replacement Copy for the Designer
-  const renderDesignerCopyList = (draft) => {
+  // Helper: Render Replacement Copy for the Designer (Text copy fixes only)
+  const renderReplacementCopyList = (draft) => {
     if (!draft || !draft.findings) return null;
-    const fixableFindings = draft.findings.filter((f) => f.suggested_fix);
-    if (fixableFindings.length === 0) return null;
+    const copyFindings = draft.findings.filter(
+      (f) => f.suggested_fix && !["V-01", "V-02"].includes(f.rule_id) && f.source !== "contrast" && f.source !== "palette"
+    );
+    if (copyFindings.length === 0) return null;
 
     return (
       <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs p-4 sm:p-5 space-y-3">
         <div className="flex items-center justify-between pb-2 border-b border-slate-100">
           <div className="flex items-center gap-2">
-            <Edit3 className="w-4 h-4 text-blue-600" />
+            <FileText className="w-4 h-4 text-blue-600" />
             <h4 className="font-bold text-slate-900 text-sm">Replacement Copy for the Designer</h4>
           </div>
           <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700">
-            Figma / Artwork Handoff
+            Text Copy Only
           </span>
         </div>
         <p className="text-xs text-slate-500">
-          Hand these verified replacements to your graphic or UI design team to update the banner artwork:
+          Copy-pasteable text replacements to update marketing copy in design artwork:
         </p>
 
         <div className="space-y-2">
-          {fixableFindings.map((f, i) => {
+          {copyFindings.map((f, i) => {
             const designerLine = `Change "${f.quote}" to "${f.suggested_fix}"`;
-            const isCopied = copiedItem === `designer-${f.id || i}`;
+            const isCopied = copiedItem === `copy-${f.id || i}`;
 
             return (
               <div
@@ -998,7 +1040,69 @@ export default function App() {
                 </div>
                 <button
                   type="button"
-                  onClick={() => handleCopyText(designerLine, `designer-${f.id || i}`)}
+                  onClick={() => handleCopyText(designerLine, `copy-${f.id || i}`)}
+                  className="px-2.5 py-1 bg-white hover:bg-slate-100 border border-slate-200 rounded text-[11px] font-bold text-slate-700 transition-all flex items-center gap-1 shrink-0"
+                >
+                  {isCopied ? (
+                    <>
+                      <Check className="w-3 h-3 text-emerald-600" /> Copied
+                    </>
+                  ) : (
+                    <>
+                      <FileText className="w-3 h-3" /> Copy
+                    </>
+                  )}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  // Helper: Render Design Fixes (Visual contrast & colour fixes)
+  const renderDesignFixesList = (draft) => {
+    if (!draft || !draft.findings) return null;
+    const designFindings = draft.findings.filter(
+      (f) => ["V-01", "V-02"].includes(f.rule_id) || f.source === "contrast" || f.source === "palette"
+    );
+    if (designFindings.length === 0) return null;
+
+    return (
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs p-4 sm:p-5 space-y-3">
+        <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+          <div className="flex items-center gap-2">
+            <Palette className="w-4 h-4 text-purple-600" />
+            <h4 className="font-bold text-slate-900 text-sm">Design Fixes</h4>
+          </div>
+          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-50 text-purple-700">
+            Contrast &amp; Colour
+          </span>
+        </div>
+        <p className="text-xs text-slate-500">
+          Visual styling adjustments required to meet WCAG AA contrast and brand palette guidelines:
+        </p>
+
+        <div className="space-y-2">
+          {designFindings.map((f, i) => {
+            const designLine = f.rule_id === "V-01"
+              ? `Change text colour on "${f.quote}" to meet 4.5:1 minimum contrast ratio.`
+              : `Adjust background or accents to adhere to approved brand palette colours (${(visualSettings.palette || []).join(", ")}).`;
+            const isCopied = copiedItem === `design-${f.id || i}`;
+
+            return (
+              <div
+                key={f.id || i}
+                className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 flex items-center justify-between gap-2 text-xs"
+              >
+                <div className="text-slate-800 leading-snug">
+                  <span className="font-mono font-bold text-purple-700 mr-1">[{f.rule_id}]</span>
+                  <span>{designLine}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleCopyText(designLine, `design-${f.id || i}`)}
                   className="px-2.5 py-1 bg-white hover:bg-slate-100 border border-slate-200 rounded text-[11px] font-bold text-slate-700 transition-all flex items-center gap-1 shrink-0"
                 >
                   {isCopied ? (
@@ -1889,7 +1993,7 @@ export default function App() {
                             </span>
                             {activeDraft.hasLogo !== undefined && (
                               <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-200 text-slate-700 font-mono">
-                                {activeDraft.hasLogo ? "✓ Brand Logo Detected" : "No Logo Detected"}
+                                {activeDraft.hasLogo ? "Brand Logo Detected" : "No logo detected"}
                               </span>
                             )}
                           </div>
@@ -2011,11 +2115,12 @@ export default function App() {
 
                 {/* Right Column: Visual Cards (if visual) + Finding Cards (Accept, Edit, Reject, Undo) */}
                 <div className="lg:col-span-5 space-y-4">
-                  {/* If active draft is a visual banner, show Colour/Contrast Card and Designer Copy List */}
+                  {/* If active draft is a visual banner, show Colour/Contrast Card, Replacement Copy, and Design Fixes */}
                   {activeDraft.isVisual && (
                     <>
                       {renderColourAndContrastCard(activeDraft)}
-                      {renderDesignerCopyList(activeDraft)}
+                      {renderReplacementCopyList(activeDraft)}
+                      {renderDesignFixesList(activeDraft)}
                     </>
                   )}
 
@@ -2324,9 +2429,16 @@ export default function App() {
                         {/* Extracted Text & Alt Text */}
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                           <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
-                            <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1">
-                              Extracted Banner Text (OCR)
-                            </span>
+                            <div className="flex items-center justify-between mb-1">
+                              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                                Extracted Banner Text (OCR)
+                              </span>
+                              {activeDraft.hasLogo !== undefined && (
+                                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-200 text-slate-700 font-mono">
+                                  {activeDraft.hasLogo ? "Brand Logo Detected" : "No logo detected"}
+                                </span>
+                              )}
+                            </div>
                             <p className="text-xs font-mono text-slate-800 leading-relaxed whitespace-pre-wrap">
                               {activeDraft.originalText || activeDraft.extractedText}
                             </p>
@@ -2349,8 +2461,9 @@ export default function App() {
                         {/* Colour & Contrast Governance Card */}
                         {renderColourAndContrastCard(activeDraft)}
 
-                        {/* Replacement Copy for Designer List */}
-                        {renderDesignerCopyList(activeDraft)}
+                        {/* Replacement Copy and Design Fixes Lists */}
+                        {renderReplacementCopyList(activeDraft)}
+                        {renderDesignFixesList(activeDraft)}
                       </div>
                     ) : (
                       /* Before / After Text Copy Comparison */

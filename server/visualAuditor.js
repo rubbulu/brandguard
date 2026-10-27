@@ -4,6 +4,7 @@ import fs from "fs";
 import { callGeminiReview, ACTIVE_MODEL, CANDIDATE_MODELS } from "./geminiService.js";
 import { validateFindings } from "./validator.js";
 import { getWorkspaceImagesDir } from "./workspaceStore.js";
+import { detectPromptInjection } from "./securityScanner.js";
 
 // --- Color Math Helpers (CIE Lab & WCAG) ---
 
@@ -85,14 +86,14 @@ Analyze the image and return a JSON object with:
 1. "extracted_text": string containing all text written in the image exactly as written, preserving original words. If no text, return "".
 2. "text_regions": array of objects { "text": string, "x": number, "y": number, "w": number, "h": number } where x, y, w, h are normalized coordinates between 0 and 1 representing the bounding box of each text element.
 3. "alt_text": string (max 125 characters) describing only what is visually depicted in the image. Describe only what is visible, never add claims, never mention things not shown.
-4. "has_logo": boolean (true if a company or brand logo is visible, false otherwise. Informational only).
+4. "campuspro_logo_detected": boolean (set to true ONLY if the official CampusPro brand logo mark, icon, or emblem is clearly matched in the image; otherwise false. Do NOT mark true for generic geometric shapes or unbranded graphics).
 
 Return valid JSON only matching this schema:
 {
   "extracted_text": "...",
   "text_regions": [{ "text": "...", "x": 0.1, "y": 0.2, "w": 0.8, "h": 0.1 }],
   "alt_text": "...",
-  "has_logo": false
+  "campuspro_logo_detected": false
 }`;
 
 export async function runVisualAudit({
@@ -166,7 +167,7 @@ export async function runVisualAudit({
               role: "user",
               parts: [
                 { inline_data: { mime_type: "image/jpeg", data: base64Image } },
-                { text: "Extract text, text bounding boxes, alt text, and logo status." }
+                { text: "Extract text, text bounding boxes, alt text, and CampusPro logo status." }
               ]
             }
           ],
@@ -202,24 +203,30 @@ export async function runVisualAudit({
   }
 
   if (!visionData) {
-    // If Gemini Vision completely failed, fallback to empty extraction with notice
     console.warn("[Visual Review] Gemini Vision failed across all models:", lastVisionError?.message);
     visionData = {
       extracted_text: "",
       text_regions: [],
       alt_text: "Marketing banner image.",
-      has_logo: false
+      campuspro_logo_detected: false
     };
   }
 
   const extractedText = (visionData.extracted_text || "").trim();
   const textRegions = Array.isArray(visionData.text_regions) ? visionData.text_regions : [];
   let altText = (visionData.alt_text || "").trim().slice(0, 125);
-  const hasLogo = Boolean(visionData.has_logo);
+  // Match CampusPro logo explicitly
+  const hasLogo = Boolean(visionData.campuspro_logo_detected);
 
   const allFindings = [];
 
-  // 5. TEXT CHECK: send extracted_text through existing review + validator
+  // 5. PROMPT INJECTION SCANNER: Run before review step
+  const injectionFindings = detectPromptInjection(extractedText);
+  for (const inj of injectionFindings) {
+    allFindings.push(inj);
+  }
+
+  // 6. TEXT CHECK: send extracted_text through existing review + validator
   let keptTextCount = 0;
   let droppedTextCount = 0;
 
@@ -249,7 +256,7 @@ export async function runVisualAudit({
     }
   }
 
-  // 6. CONTRAST CHECK (Code only, no AI)
+  // 7. CONTRAST CHECK: Compute in code from sampled colors for each text region
   const minContrastRatio = Number(visualSettings.minContrastRatio) || 4.5;
   const contrastResults = [];
 
@@ -260,11 +267,15 @@ export async function runVisualAudit({
     const width = Math.min(imgWidth - left, Math.max(1, Math.floor((region.w || 0.1) * imgWidth)));
     const height = Math.min(imgHeight - top, Math.max(1, Math.floor((region.h || 0.1) * imgHeight)));
 
-    if (width < 10 || height < 10 || left + width > imgWidth || top + height > imgHeight) {
+    if (width < 4 || height < 4 || left + width > imgWidth || top + height > imgHeight) {
+      region.contrastRatio = null;
+      region.calculationType = "estimated";
+      region.passesContrast = null;
       contrastResults.push({
         text: region.text,
         measured: false,
-        reason: "could not measure (region too small)",
+        calculationType: "estimated",
+        reason: "could not measure (region bounds invalid)",
         needs_human_judgement: true
       });
       continue;
@@ -277,11 +288,10 @@ export async function runVisualAudit({
         .raw()
         .toBuffer();
 
-      // Sample pixels: calculate luminance and separate into dark / bright groups
       const numPixels = width * height;
       const sampledPixels = [];
 
-      // Sample up to 600 pixels to be fast and stable
+      // Sample up to 600 pixels across the text region
       const step = Math.max(1, Math.floor(numPixels / 600));
       for (let p = 0; p < numPixels; p += step) {
         const offset = p * 3;
@@ -294,10 +304,14 @@ export async function runVisualAudit({
         }
       }
 
-      if (sampledPixels.length < 4) {
+      if (sampledPixels.length < 2) {
+        region.contrastRatio = null;
+        region.calculationType = "estimated";
+        region.passesContrast = null;
         contrastResults.push({
           text: region.text,
           measured: false,
+          calculationType: "estimated",
           reason: "could not measure",
           needs_human_judgement: true
         });
@@ -307,8 +321,7 @@ export async function runVisualAudit({
       // Sort by luminance
       sampledPixels.sort((a, b) => a.lum - b.lum);
 
-      // In text regions, background is the dominant baseline and text strokes peak at the opposite luminance extreme.
-      // We sample the 5th percentile (darkest pixels) and 95th percentile (brightest pixels) to measure contrast accurately.
+      // 5th percentile (text stroke or dark background) vs 95th percentile (bright baseline)
       const p05Idx = Math.max(0, Math.floor(sampledPixels.length * 0.05));
       const p95Idx = Math.min(sampledPixels.length - 1, Math.floor(sampledPixels.length * 0.95));
 
@@ -319,14 +332,25 @@ export async function runVisualAudit({
       const fgHex = rgbToHex(lightPixel.r, lightPixel.g, lightPixel.b);
       const bgHex = rgbToHex(darkPixel.r, darkPixel.g, darkPixel.b);
 
+      const ratioNum = Number(ratio.toFixed(2));
+      const passesContrast = ratioNum >= minContrastRatio;
+
+      // Assign directly to region object for frontend overlays and lists
+      region.contrastRatio = ratioNum;
+      region.fgColor = fgHex;
+      region.bgColor = bgHex;
+      region.calculationType = "computed";
+      region.passesContrast = passesContrast;
+
       const resultItem = {
         text: region.text,
         measured: true,
-        ratio: Number(ratio.toFixed(2)),
+        calculationType: "computed",
+        ratio: ratioNum,
         requiredRatio: minContrastRatio,
         foregroundHex: fgHex,
         backgroundHex: bgHex,
-        passes: ratio >= minContrastRatio
+        passes: passesContrast
       };
       contrastResults.push(resultItem);
 
@@ -337,8 +361,8 @@ export async function runVisualAudit({
           quote: region.text,
           category: "accessibility",
           severity: "high",
-          explanation: `Text contrast ratio is ${ratio.toFixed(2)}:1 (foreground ${fgHex}, background ${bgHex}), which fails the minimum required ${minContrastRatio}:1 (WCAG AA). [estimated]`,
-          suggested_fix: `Increase contrast between text (${fgHex}) and background (${bgHex}) to meet at least ${minContrastRatio}:1.`,
+          explanation: `Text contrast ratio is ${ratio.toFixed(2)}:1 (foreground ${fgHex}, background ${bgHex}), which fails the minimum required ${minContrastRatio}:1 (WCAG AA). [computed]`,
+          suggested_fix: `Change text colour (${fgHex}) to meet at least ${minContrastRatio}:1 minimum contrast ratio against background (${bgHex}).`,
           needs_human_judgement: true,
           source: "contrast",
           measured_ratio: Number(ratio.toFixed(2)),
@@ -349,26 +373,31 @@ export async function runVisualAudit({
       }
     } catch (contrastErr) {
       console.warn(`[Contrast Sampling Error on "${region.text}"]:`, contrastErr.message);
+      region.contrastRatio = null;
+      region.calculationType = "estimated";
+      region.passesContrast = null;
       contrastResults.push({
         text: region.text,
         measured: false,
+        calculationType: "estimated",
         reason: "could not measure",
         needs_human_judgement: true
       });
     }
   }
 
-  // 7. PALETTE CHECK (Code only): downscale to 64x64, map in CIE Lab
+  // 8. PALETTE CHECK (V-02): Computed from actual image pixels; never defaults to compliant
   const brandPalette = (visualSettings.palette && visualSettings.palette.length > 0)
     ? visualSettings.palette
     : ["#1D4ED8", "#0F172A", "#FFFFFF", "#F59E0B"];
 
-  const brandLabs = brandPalette.map(hex => rgbToLab(...hexToRgb(hex)));
-
   let paletteSummary = {
     brand_palette: brandPalette,
-    off_palette_percentage: 0,
-    top_off_palette_hex: []
+    measured: false,
+    off_palette_percentage: null,
+    on_palette_percentage: null,
+    top_off_palette_hex: [],
+    status: "not_measured"
   };
 
   try {
@@ -379,65 +408,74 @@ export async function runVisualAudit({
       .toBuffer();
 
     const totalPixels = 64 * 64; // 4096
-    let offPaletteCount = 0;
-    const offColorCounts = new Map();
+    if (thumbBuffer && thumbBuffer.length >= totalPixels * 3) {
+      const brandLabs = brandPalette.map(hex => rgbToLab(...hexToRgb(hex)));
+      let offPaletteCount = 0;
+      const offColorCounts = new Map();
 
-    for (let i = 0; i < totalPixels; i++) {
-      const offset = i * 3;
-      const r = thumbBuffer[offset];
-      const g = thumbBuffer[offset + 1];
-      const b = thumbBuffer[offset + 2];
+      for (let i = 0; i < totalPixels; i++) {
+        const offset = i * 3;
+        const r = thumbBuffer[offset];
+        const g = thumbBuffer[offset + 1];
+        const b = thumbBuffer[offset + 2];
 
-      const pLab = rgbToLab(r, g, b);
+        const pLab = rgbToLab(r, g, b);
 
-      let minDistance = Infinity;
-      for (const bLab of brandLabs) {
-        const d = labDistance(pLab, bLab);
-        if (d < minDistance) minDistance = d;
+        let minDistance = Infinity;
+        for (const bLab of brandLabs) {
+          const d = labDistance(pLab, bLab);
+          if (d < minDistance) minDistance = d;
+        }
+
+        if (minDistance > 30) {
+          offPaletteCount++;
+          // Quantize off-palette color (step of 32)
+          const qR = Math.round(r / 32) * 32;
+          const qG = Math.round(g / 32) * 32;
+          const qB = Math.round(b / 32) * 32;
+          const qHex = rgbToHex(qR, qG, qB);
+          offColorCounts.set(qHex, (offColorCounts.get(qHex) || 0) + 1);
+        }
       }
 
-      if (minDistance > 30) {
-        offPaletteCount++;
-        // Quantize off-palette color (step of 32)
-        const qR = Math.round(r / 32) * 32;
-        const qG = Math.round(g / 32) * 32;
-        const qB = Math.round(b / 32) * 32;
-        const qHex = rgbToHex(qR, qG, qB);
-        offColorCounts.set(qHex, (offColorCounts.get(qHex) || 0) + 1);
+      const offPalettePct = Math.round((offPaletteCount / totalPixels) * 100);
+      const topOffColors = [...offColorCounts.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 3)
+        .map(([hex]) => hex);
+
+      paletteSummary = {
+        brand_palette: brandPalette,
+        measured: true,
+        flagged: offPalettePct > 35,
+        off_palette_percentage: offPalettePct,
+        on_palette_percentage: Math.max(0, 100 - offPalettePct),
+        top_off_palette_hex: topOffColors,
+        status: offPalettePct > 35 ? "flagged" : "compliant"
+      };
+
+      if (offPalettePct > 35) {
+        allFindings.push({
+          id: `finding-palette-${Date.now()}`,
+          rule_id: "V-02",
+          quote: "(Image color palette)",
+          category: "brand",
+          severity: "medium",
+          explanation: `${offPalettePct}% of image pixels deviate significantly from the approved brand palette (distance > 30 in CIE Lab). Top off-palette colours: ${topOffColors.join(", ")}. [computed]`,
+          suggested_fix: `Adjust banner background and accents (${topOffColors.join(", ")}) to adhere to approved brand colours (${brandPalette.join(", ")}).`,
+          needs_human_judgement: true,
+          source: "palette",
+          status: "pending"
+        });
       }
-    }
-
-    const offPalettePct = Math.round((offPaletteCount / totalPixels) * 100);
-    const topOffColors = [...offColorCounts.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 3)
-      .map(([hex]) => hex);
-
-    paletteSummary = {
-      brand_palette: brandPalette,
-      off_palette_percentage: offPalettePct,
-      top_off_palette_hex: topOffColors
-    };
-
-    if (offPalettePct > 35) {
-      allFindings.push({
-        id: `finding-palette-${Date.now()}`,
-        rule_id: "V-02",
-        quote: "(Image color palette)",
-        category: "brand",
-        severity: "medium",
-        explanation: `${offPalettePct}% of image pixels deviate significantly from the approved brand palette (distance > 30 in CIE Lab). Top off-palette colours: ${topOffColors.join(", ")}. [estimated]`,
-        suggested_fix: `Adjust banner background and accents to use approved brand palette colours (${brandPalette.join(", ")}).`,
-        needs_human_judgement: true, // Always mark needs_human_judgement because photos legitimately contain other colours
-        source: "palette",
-        status: "pending"
-      });
     }
   } catch (palErr) {
     console.warn("[Palette Check Error]:", palErr.message);
+    paletteSummary.measured = false;
+    paletteSummary.status = "not_measured";
   }
 
-  // 8. DISCLAIMER CHECK (Code): if disclaimer phrase set and not found
+  // 9. DISCLAIMER CHECK: if disclaimer phrase set and not found
   const disclaimerPhrase = (visualSettings.disclaimerPhrase || "").trim();
   if (disclaimerPhrase !== "") {
     const found = extractedText.toLowerCase().includes(disclaimerPhrase.toLowerCase());
@@ -457,7 +495,7 @@ export async function runVisualAudit({
     }
   }
 
-  // 9. ALT TEXT CHECK: flag V-03 only if user clears it (or if initial alt text is empty)
+  // 10. ALT TEXT CHECK: flag V-03 only if initial alt text is empty or cleared
   if (!altText || altText.trim() === "") {
     allFindings.push({
       id: `finding-alt-${Date.now()}`,
@@ -473,16 +511,51 @@ export async function runVisualAudit({
     });
   }
 
+  // 11. DE-DUPLICATE FINDINGS on the same text, keeping highest severity
+  const severityRank = { high: 3, medium: 2, low: 1 };
+  const finalFindings = [];
+  const quoteMap = new Map();
+
+  for (const f of allFindings) {
+    const key = (f.quote || "").trim().toLowerCase();
+    // Do not de-duplicate generic structural items like "(Image color palette)"
+    if (!key || key.startsWith("(") || key.startsWith("[")) {
+      finalFindings.push(f);
+      continue;
+    }
+    if (!quoteMap.has(key)) {
+      quoteMap.set(key, []);
+    }
+    quoteMap.get(key).push(f);
+  }
+
+  for (const [key, group] of quoteMap.entries()) {
+    if (group.length === 1) {
+      finalFindings.push(group[0]);
+    } else {
+      group.sort((a, b) => {
+        const diff = (severityRank[b.severity] || 1) - (severityRank[a.severity] || 1);
+        if (diff !== 0) return diff;
+        const aIsFact = a.rule_id.startsWith("F-") ? 1 : 0;
+        const bIsFact = b.rule_id.startsWith("F-") ? 1 : 0;
+        if (bIsFact !== aIsFact) return bIsFact - aIsFact;
+        return (b.suggested_fix ? 1 : 0) - (a.suggested_fix ? 1 : 0);
+      });
+      finalFindings.push(group[0]);
+      droppedTextCount += (group.length - 1);
+    }
+  }
+
   return {
     extracted_text: extractedText,
     regions: textRegions,
     alt_text: altText,
     has_logo: hasLogo,
-    findings: allFindings,
+    findings: finalFindings,
     contrast_results: contrastResults,
     palette_summary: paletteSummary,
     stats: {
-      kept: keptTextCount + allFindings.filter(f => f.source !== "text").length,
+      kept: finalFindings.length,
       dropped_by_validator: droppedTextCount
     },
     imageUrl

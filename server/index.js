@@ -8,6 +8,7 @@ import { callGeminiReview, ACTIVE_MODEL } from "./geminiService.js";
 import { validateFindings } from "./validator.js";
 import { loadWorkspace, saveWorkspace, resetWorkspace } from "./workspaceStore.js";
 import { runVisualAudit } from "./visualAuditor.js";
+import { detectPromptInjection } from "./securityScanner.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -284,7 +285,7 @@ app.post("/api/drafts", (req, res) => {
 });
 
 // --- 6. AI Review Endpoint with Validator Engine & Rate Limiting ---
-app.post("/api/review", async (req, res) => {
+app.post(["/api/review", "/review"], async (req, res) => {
   try {
     const { draftId, draftText } = req.body;
 
@@ -309,7 +310,10 @@ app.post("/api/review", async (req, res) => {
       return res.status(400).json({ error: "Draft text is empty." });
     }
 
-    // Call Gemini with cascading fallback
+    // 1. Detect instruction-like text / prompt injection before AI review
+    const injectionFindings = detectPromptInjection(textToReview);
+
+    // 2. Call Gemini with cascading fallback
     let rawAiFindings = [];
     let modelUsed = ACTIVE_MODEL;
     try {
@@ -333,13 +337,20 @@ app.post("/api/review", async (req, res) => {
       });
     }
 
-    // Run the deterministic Validator
+    // 3. Run the deterministic Validator
     const validationResult = validateFindings(
       textToReview,
       rawAiFindings,
       req.workspace.rules,
       req.workspace.facts
     );
+
+    // 4. Prepend prompt injection findings (they can never be suppressed by AI verdicts)
+    for (const inj of injectionFindings) {
+      if (!validationResult.accepted.some(f => f.quote.toLowerCase() === inj.quote.toLowerCase())) {
+        validationResult.accepted.unshift(inj);
+      }
+    }
 
     // Persist on draft if applicable
     if (targetDraft) {
