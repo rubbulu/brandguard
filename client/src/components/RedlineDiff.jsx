@@ -6,18 +6,19 @@ import { Columns, AlignLeft, Info, CheckCircle2 } from "lucide-react";
  * Associates diff changes with causing Rule IDs from findings
  */
 function matchRuleIdForChunk(chunkValue, isRemoved, findings = []) {
-  if (!chunkValue || !chunkValue.trim()) return null;
+  if (!chunkValue || typeof chunkValue !== "string" || !chunkValue.trim()) return null;
   const cleanChunk = chunkValue.trim().toLowerCase();
+  if (!Array.isArray(findings)) return null;
 
   for (const f of findings) {
     if (!f || !f.rule_id) continue;
     if (isRemoved) {
-      const q = (f.quote || "").trim().toLowerCase();
-      if (q && (q.includes(cleanChunk) || cleanChunk.includes(q))) {
+      const q = typeof f.quote === "string" ? f.quote.trim().toLowerCase() : "";
+      if (q && !q.startsWith("(") && (q.includes(cleanChunk) || cleanChunk.includes(q))) {
         return f.rule_id;
       }
     } else {
-      const fix = (f.suggested_fix || "").trim().toLowerCase();
+      const fix = typeof f.suggested_fix === "string" ? f.suggested_fix.trim().toLowerCase() : "";
       if (fix && (fix.includes(cleanChunk) || cleanChunk.includes(fix))) {
         return f.rule_id;
       }
@@ -38,16 +39,24 @@ export default function RedlineDiff({
   const [diffMode, setDiffMode] = useState(defaultMode); // 'inline' | 'side-by-side'
 
   const diffChunks = useMemo(() => {
-    if (!originalText && !finalText) return [];
-    const chunks = diffWordsWithSpace(originalText || "", finalText || "");
-    return chunks.map(chunk => {
-      const ruleId = chunk.removed
-        ? matchRuleIdForChunk(chunk.value, true, findings)
-        : chunk.added
-        ? matchRuleIdForChunk(chunk.value, false, findings)
-        : null;
-      return { ...chunk, ruleId };
-    });
+    try {
+      const orig = typeof originalText === "string" ? originalText : String(originalText || "");
+      const fin = typeof finalText === "string" ? finalText : String(finalText || "");
+      if (!orig && !fin) return [];
+      const chunks = diffWordsWithSpace(orig, fin);
+      const safeFindings = Array.isArray(findings) ? findings : [];
+      return chunks.map(chunk => {
+        const ruleId = chunk.removed
+          ? matchRuleIdForChunk(chunk.value, true, safeFindings)
+          : chunk.added
+          ? matchRuleIdForChunk(chunk.value, false, safeFindings)
+          : null;
+        return { ...chunk, ruleId };
+      });
+    } catch (err) {
+      console.warn("[RedlineDiff Computation Warning]:", err);
+      return [];
+    }
   }, [originalText, finalText, findings]);
 
   const hasChanges = useMemo(() => {

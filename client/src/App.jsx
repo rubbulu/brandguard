@@ -33,6 +33,7 @@ import {
 import RedlineDiff from "./components/RedlineDiff";
 import ComplianceCertificate from "./components/ComplianceCertificate";
 import PublicVerifyPage from "./components/PublicVerifyPage";
+import ErrorBoundary from "./components/ErrorBoundary";
 
 // Get or initialize persistent Workspace ID for this browser visitor
 function getOrCreateWorkspaceId() {
@@ -261,7 +262,13 @@ export default function App() {
         const dList = await draftsRes.json();
         setAllDrafts(dList);
         if (dList.length > 0) {
-          setActiveDraft((prev) => (prev ? dList.find((d) => d.id === prev.id) || dList[0] : dList[0]));
+          setActiveDraft((prev) => {
+            const nextDraft = prev ? dList.find((d) => d.id === prev.id) || dList[0] : dList[0];
+            if (nextDraft && nextDraft.isVisual) {
+              setCreatorMode("visual");
+            }
+            return nextDraft;
+          });
         } else {
           setActiveDraft(null);
         }
@@ -821,23 +828,41 @@ export default function App() {
 
   // Render Highlighted Draft Text (Left Pane in Creator View)
   const renderHighlightedText = (text, findings = []) => {
-    if (!findings || findings.length === 0) {
-      return <span className="text-slate-800">{text}</span>;
+    if (!text || typeof text !== "string") {
+      return <span className="text-slate-400 italic">No text extracted from banner</span>;
+    }
+
+    if (!Array.isArray(findings) || findings.length === 0) {
+      return <span className="text-slate-800 whitespace-pre-wrap">{text}</span>;
     }
 
     const matches = [];
     for (const f of findings) {
-      const idx = text.indexOf(f.quote);
+      if (!f || !f.quote || typeof f.quote !== "string") continue;
+      const cleanQuote = f.quote.trim();
+      if (!cleanQuote || cleanQuote.startsWith("(") || cleanQuote.startsWith("[")) continue;
+
+      const idx = text.indexOf(cleanQuote);
       if (idx !== -1) {
-        matches.push({ start: idx, end: idx + f.quote.length, finding: f });
+        matches.push({ start: idx, end: idx + cleanQuote.length, finding: f, matchedQuote: cleanQuote });
       }
     }
+
+    if (matches.length === 0) {
+      return <span className="text-slate-800 whitespace-pre-wrap">{text}</span>;
+    }
+
     matches.sort((a, b) => a.start - b.start);
 
     let result = [];
     let currentIndex = 0;
 
-    for (const match of matches) {
+    for (let i = 0; i < matches.length; i++) {
+      const match = matches[i];
+      if (match.start < currentIndex) {
+        continue;
+      }
+
       if (match.start > currentIndex) {
         result.push(
           <span key={`txt-${currentIndex}`}>{text.substring(currentIndex, match.start)}</span>
@@ -849,7 +874,7 @@ export default function App() {
 
       // Color coding: Red = High, Amber = Medium, Yellow = Low, Violet = Fact
       let highlightClass = "highlight-high";
-      if (f.category === "fact" || f.rule_id.startsWith("F-")) highlightClass = "highlight-fact";
+      if (f.category === "fact" || (f.rule_id && f.rule_id.startsWith("F-"))) highlightClass = "highlight-fact";
       else if (f.severity === "medium") highlightClass = "highlight-medium";
       else if (f.severity === "low") highlightClass = "highlight-low";
 
@@ -858,14 +883,14 @@ export default function App() {
 
       result.push(
         <mark
-          key={f.id}
+          key={f.id || `mark-${i}`}
           className={`${highlightClass} ${isSelected ? "ring-2 ring-blue-600 font-bold" : ""} ${
             isDecided ? "opacity-60" : ""
           }`}
           onClick={() => setSelectedFindingId(f.id)}
-          title={`Click to inspect [${f.rule_id}]: ${f.explanation}`}
+          title={`Click to inspect [${f.rule_id}]: ${f.explanation || ""}`}
         >
-          {match.finding.quote}
+          {match.matchedQuote}
           <span className="text-[10px] ml-1 px-1 py-0.2 bg-black/10 rounded font-mono">
             {f.rule_id}
           </span>
@@ -876,7 +901,7 @@ export default function App() {
     }
 
     if (currentIndex < text.length) {
-      result.push(<span key={`txt-${currentIndex}`}>{text.substring(currentIndex)}</span>);
+      result.push(<span key={`txt-end`}>{text.substring(currentIndex)}</span>);
     }
 
     return <div className="leading-relaxed text-slate-800 text-sm whitespace-pre-wrap">{result}</div>;
@@ -902,18 +927,22 @@ export default function App() {
   };
 
   const calcContrast = (hex1, hex2) => {
-    const rgb1 = getRgbFromHex(hex1);
-    const rgb2 = getRgbFromHex(hex2);
-    const l1 = getLuminance(...rgb1);
-    const l2 = getLuminance(...rgb2);
-    const lighter = Math.max(l1, l2);
-    const darker = Math.min(l1, l2);
-    return Number(((lighter + 0.05) / (darker + 0.05)).toFixed(2));
+    try {
+      const rgb1 = getRgbFromHex(hex1);
+      const rgb2 = getRgbFromHex(hex2);
+      const l1 = getLuminance(...rgb1);
+      const l2 = getLuminance(...rgb2);
+      const lighter = Math.max(l1, l2);
+      const darker = Math.min(l1, l2);
+      return Number(((lighter + 0.05) / (darker + 0.05)).toFixed(2));
+    } catch {
+      return null;
+    }
   };
 
   // Helper: Render Audited Banner Image with Interactive Bounding Boxes
   const renderBannerImageWithBoxes = (draft, preview) => {
-    const imgSrc = preview || draft?.imagePath;
+    const imgSrc = preview || draft?.imageUrl || draft?.imagePath;
 
     return (
       <div className="relative w-full overflow-hidden rounded-xl bg-slate-950 flex items-center justify-center p-2 border border-slate-200">
@@ -931,18 +960,21 @@ export default function App() {
           )}
 
           {/* Bounding box overlays (hidden while isVisualAuditing) */}
-          {!isVisualAuditing && draft?.regions?.map((reg, idx) => {
+          {!isVisualAuditing && Array.isArray(draft?.regions) && draft.regions.map((reg, idx) => {
+            if (!reg) return null;
             const isHovered = hoveredRegionIdx === idx;
             const measuredRatio = reg.contrastRatio || (reg.fgColor && reg.bgColor ? calcContrast(reg.fgColor, reg.bgColor) : null);
+            const regText = typeof reg.text === "string" ? reg.text : "";
             const isFindingSelected =
               selectedFindingId &&
-              draft.findings?.some(
+              Array.isArray(draft.findings) &&
+              draft.findings.some(
                 (f) =>
-                  f.id === selectedFindingId &&
-                  ((f.quote && reg.text && f.quote.toLowerCase().includes(reg.text.toLowerCase())) ||
-                    (f.explanation && f.explanation.includes(reg.text)))
+                  f && f.id === selectedFindingId &&
+                  ((f.quote && regText && f.quote.toLowerCase().includes(regText.toLowerCase())) ||
+                    (f.explanation && regText && f.explanation.includes(regText)))
               );
-            const hasContrastFail = reg.passesContrast === false || (measuredRatio !== null && measuredRatio < (visualSettings.minContrastRatio || 4.5));
+            const hasContrastFail = reg.passesContrast === false || (measuredRatio !== null && measuredRatio < (visualSettings?.minContrastRatio || 4.5));
 
             return (
               <div
@@ -963,7 +995,7 @@ export default function App() {
                     ? "border-red-500 bg-red-500/20 z-10"
                     : "border-emerald-400 bg-emerald-400/10 z-10"
                 }`}
-                title={`Region #${idx + 1}: "${reg.text}" (${measuredRatio ? measuredRatio + ':1' : 'could not measure'})`}
+                title={`Region #${idx + 1}: "${regText}" (${measuredRatio ? measuredRatio + ':1' : 'could not measure'})`}
               >
                 <span
                   className={`absolute -top-4 left-0 text-[9px] font-bold px-1 rounded font-mono shadow-xs ${
@@ -983,9 +1015,9 @@ export default function App() {
   // Helper: Render Colour and Contrast Governance Card
   const renderColourAndContrastCard = (draft) => {
     if (!draft) return null;
-    const paletteCheck = draft.paletteCheck;
-    const offPercent = paletteCheck?.offPalettePercentage || 0;
-    const onPercent = Math.max(0, 100 - offPercent);
+    const paletteCheck = draft.paletteSummary || draft.paletteCheck;
+    const offColors = paletteCheck?.dominantOffColors || paletteCheck?.top_off_palette_hex || [];
+    const onPct = paletteCheck?.on_palette_percentage ?? paletteCheck?.onPalettePercentage ?? 0;
 
     return (
       <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs p-4 sm:p-5 space-y-4">
@@ -1003,14 +1035,14 @@ export default function App() {
         <div>
           <div className="flex items-center justify-between mb-1.5">
             <span className="text-xs font-bold text-slate-700">Brand Palette Match (Rule V-02):</span>
-            {paletteCheck?.measured ? (
+            {paletteCheck?.measured !== false && (paletteCheck?.on_palette_percentage !== undefined || paletteCheck?.onPalettePercentage !== undefined) ? (
               paletteCheck.flagged || paletteCheck.status === "non_compliant" || paletteCheck.status === "flagged" ? (
                 <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-800 flex items-center gap-1">
-                  <AlertTriangle className="w-3 h-3 text-red-600" /> ✕ Non-compliant ({paletteCheck.on_palette_percentage}% on-palette)
+                  <AlertTriangle className="w-3 h-3 text-red-600" /> ✕ Non-compliant ({onPct}% on-palette)
                 </span>
               ) : (
                 <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
-                  ✓ Compliant ({paletteCheck.on_palette_percentage}% on-palette)
+                  ✓ Compliant ({onPct}% on-palette)
                 </span>
               )
             ) : (
@@ -1023,7 +1055,7 @@ export default function App() {
           {/* Brand Swatches */}
           <div className="flex flex-wrap items-center gap-1.5 mb-2">
             <span className="text-[11px] text-slate-500 mr-1">Brand Colours:</span>
-            {(visualSettings.palette || []).map((hex) => (
+            {(visualSettings?.palette || []).map((hex) => (
               <span key={hex} className="inline-flex items-center gap-1 text-[11px] font-mono px-1.5 py-0.5 bg-slate-50 border border-slate-200 rounded">
                 <span className="w-3 h-3 rounded-full border border-slate-300" style={{ backgroundColor: hex }} />
                 {hex}
@@ -1032,13 +1064,13 @@ export default function App() {
           </div>
 
           {/* If off-palette flagged, show dominant 3 off colors */}
-          {paletteCheck?.flagged && paletteCheck?.dominantOffColors?.length > 0 && (
+          {paletteCheck?.flagged && offColors.length > 0 && (
             <div className="p-2.5 bg-amber-50/70 border border-amber-200 rounded-xl text-xs space-y-1.5">
               <span className="text-amber-900 font-bold block">
                 3 Most Common Off-Palette Colours:
               </span>
               <div className="flex flex-wrap gap-2">
-                {paletteCheck.dominantOffColors.map((offHex, idx) => (
+                {offColors.map((offHex, idx) => (
                   <span key={idx} className="inline-flex items-center gap-1.5 font-mono text-[11px] bg-white px-2 py-1 rounded border border-amber-300 shadow-2xs">
                     <span className="w-3.5 h-3.5 rounded-sm border border-slate-300" style={{ backgroundColor: offHex }} />
                     <strong className="text-slate-800">{offHex}</strong>
@@ -1059,19 +1091,21 @@ export default function App() {
               Typography Contrast Ratios (Rule V-01):
             </span>
             <span className="text-[11px] text-slate-500 font-mono">
-              Min Target: {visualSettings.minContrastRatio || 4.5}:1
+              Min Target: {visualSettings?.minContrastRatio || 4.5}:1
             </span>
           </div>
 
-          {(!draft.regions || draft.regions.length === 0) ? (
+          {(!Array.isArray(draft.regions) || draft.regions.length === 0) ? (
             <p className="text-xs text-slate-400 italic">No text regions detected in image.</p>
           ) : (
             <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
               {draft.regions.map((reg, idx) => {
+                if (!reg) return null;
                 const measuredRatio = reg.contrastRatio || (reg.fgColor && reg.bgColor ? calcContrast(reg.fgColor, reg.bgColor) : null);
                 const calcType = reg.calculationType || (measuredRatio ? "computed" : "estimated");
-                const isPassed = measuredRatio !== null ? measuredRatio >= (visualSettings.minContrastRatio || 4.5) : false;
+                const isPassed = measuredRatio !== null ? measuredRatio >= (visualSettings?.minContrastRatio || 4.5) : false;
                 const isHovered = hoveredRegionIdx === idx;
+                const regText = typeof reg.text === "string" ? reg.text : "";
 
                 return (
                   <div
@@ -1091,7 +1125,7 @@ export default function App() {
                         <span className="w-4 h-4 rounded-full bg-slate-200 text-slate-700 text-[10px] flex items-center justify-center font-mono">
                           {idx + 1}
                         </span>
-                        <span className="truncate max-w-[200px]">"{reg.text}"</span>
+                        <span className="truncate max-w-[200px]">"{regText}"</span>
                       </span>
 
                       <div className="flex items-center gap-1.5">
@@ -1138,9 +1172,9 @@ export default function App() {
 
   // Helper: Render Replacement Copy for the Designer (Text copy fixes only)
   const renderReplacementCopyList = (draft) => {
-    if (!draft || !draft.findings) return null;
+    if (!draft || !Array.isArray(draft.findings)) return null;
     const copyFindings = draft.findings.filter(
-      (f) => f.suggested_fix && f.rule_id !== "SEC-01" && f.source !== "security" && !["V-01", "V-02"].includes(f.rule_id) && f.source !== "contrast" && f.source !== "palette"
+      (f) => f && f.suggested_fix && f.rule_id !== "SEC-01" && f.source !== "security" && !["V-01", "V-02", "V-03"].includes(f.rule_id) && f.source !== "contrast" && f.source !== "palette" && f.source !== "alt_text"
     );
     if (copyFindings.length === 0) return null;
 
@@ -1161,7 +1195,7 @@ export default function App() {
 
         <div className="space-y-2">
           {copyFindings.map((f, i) => {
-            const designerLine = `Change "${f.quote}" to "${f.suggested_fix}"`;
+            const designerLine = `Change "${f.quote || ""}" to "${f.suggested_fix || ""}"`;
             const isCopied = copiedItem === `copy-${f.id || i}`;
 
             return (
@@ -1170,9 +1204,9 @@ export default function App() {
                 className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 flex items-center justify-between gap-2 text-xs"
               >
                 <div className="font-mono text-slate-800 leading-snug">
-                  <span className="text-red-700 font-bold line-through mr-1">"{f.quote}"</span>
+                  <span className="text-red-700 font-bold line-through mr-1">"{f.quote || ""}"</span>
                   <span className="text-slate-400 font-sans mr-1">&rarr;</span>
-                  <span className="text-emerald-700 font-bold">"{f.suggested_fix}"</span>
+                  <span className="text-emerald-700 font-bold">"{f.suggested_fix || ""}"</span>
                   <span className="text-[10px] text-slate-400 font-sans ml-2">[{f.rule_id}]</span>
                 </div>
                 <button
@@ -1196,25 +1230,27 @@ export default function App() {
         </div>
 
         {/* Word-Level Redline Diff for Visual Banner Copy */}
-        <div className="pt-2 border-t border-slate-100">
-          <RedlineDiff
-            originalText={draft.originalText}
-            finalText={draft.currentText}
-            findings={draft.findings}
-            title="Redline Copy Diff for Designer"
-            defaultMode="inline"
-            showToggle={true}
-          />
-        </div>
+        {Boolean(draft.originalText && draft.currentText) && (
+          <div className="pt-2 border-t border-slate-100">
+            <RedlineDiff
+              originalText={draft.originalText}
+              finalText={draft.currentText}
+              findings={draft.findings}
+              title="Redline Copy Diff for Designer"
+              defaultMode="inline"
+              showToggle={true}
+            />
+          </div>
+        )}
       </div>
     );
   };
 
   // Helper: Render Design Fixes (Visual contrast & colour fixes)
   const renderDesignFixesList = (draft) => {
-    if (!draft || !draft.findings) return null;
+    if (!draft || !Array.isArray(draft.findings)) return null;
     const designFindings = draft.findings.filter(
-      (f) => ["V-01", "V-02"].includes(f.rule_id) || f.source === "contrast" || f.source === "palette"
+      (f) => f && (["V-01", "V-02"].includes(f.rule_id) || f.source === "contrast" || f.source === "palette")
     );
     if (designFindings.length === 0) return null;
 
@@ -1236,8 +1272,8 @@ export default function App() {
         <div className="space-y-2">
           {designFindings.map((f, i) => {
             const designLine = f.rule_id === "V-01"
-              ? `Change text colour on "${f.quote}" to meet 4.5:1 minimum contrast ratio.`
-              : `Adjust background or accents to adhere to approved brand palette colours (${(visualSettings.palette || []).join(", ")}).`;
+              ? `Change text colour on "${f.quote || "text"}" to meet 4.5:1 minimum contrast ratio.`
+              : `Adjust background or accents to adhere to approved brand palette colours (${(visualSettings?.palette || []).join(", ")}).`;
             const isCopied = copiedItem === `design-${f.id || i}`;
 
             return (
@@ -2204,7 +2240,8 @@ export default function App() {
                 </div>
               </div>
             ) : activeDraft ? (
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+              <ErrorBoundary onReset={() => { setActiveDraft(null); setCreatorMode("text"); handleLoadDemoScenario(); }}>
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
                 {/* Security Alert Strip for Prompt Injections */}
                 {activeDraft.findings?.some(f => f.rule_id === "SEC-01" || f.source === "security") && (
                   <div className="lg:col-span-12 p-3.5 bg-red-600 text-white rounded-xl flex items-center justify-between shadow-xs">
@@ -2693,7 +2730,8 @@ export default function App() {
                   </div>
                 )}
               </div>
-            ) : (
+            </ErrorBoundary>
+          ) : (
               /* Empty state if visitor hasn't run any draft yet */
               <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center space-y-4">
                 <FileText className="w-10 h-10 text-slate-300 mx-auto" />
@@ -2793,7 +2831,8 @@ export default function App() {
                 </div>
 
                 {/* Reviewer Action Panel */}
-                {activeDraft && (
+                <ErrorBoundary onReset={() => setActiveDraft(null)}>
+                  {activeDraft && (
                   <div className="lg:col-span-8 bg-white rounded-2xl border border-slate-200 shadow-2xs p-5 sm:p-6 space-y-5">
                     {/* Security Alert Strip for Reviewer */}
                     {activeDraft.findings?.some(f => f.rule_id === "SEC-01" || f.source === "security") && (
@@ -3001,7 +3040,8 @@ export default function App() {
                     </div>
                   </div>
                 )}
-              </div>
+              </ErrorBoundary>
+            </div>
             )}
           </div>
         )}
