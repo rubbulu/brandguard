@@ -36,15 +36,13 @@ If no problems are found, return:
 
 Return JSON only.`;
 
-export const ACTIVE_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash";
+export const ACTIVE_MODEL = process.env.GEMINI_MODEL || "gemini-flash-lite-latest";
 
 // Robust cascade prioritizing models with active quota and fast response
 export const CANDIDATE_MODELS = [
   ACTIVE_MODEL,
-  "gemini-3.5-flash",
   "gemini-flash-lite-latest",
-  "gemini-3.5-flash-lite",
-  "gemini-3.6-flash"
+  "gemini-3.5-flash-lite"
 ].filter((v, i, a) => a.indexOf(v) === i);
 
 export async function callGeminiReview({ apiKey, draftText, rules, facts }) {
@@ -64,7 +62,7 @@ ${draftText}`;
   let genConfig = {
     responseMimeType: "application/json",
     temperature: 0,
-    maxOutputTokens: 1024,
+    maxOutputTokens: 512,
     thinkingConfig: {
       thinkingBudget: 0
     }
@@ -89,7 +87,7 @@ ${draftText}`;
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 8000); // 8s timeout with thinking off
+      const timeout = setTimeout(() => controller.abort(), 45000);
 
       let response = await fetch(url, {
         method: "POST",

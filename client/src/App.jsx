@@ -122,6 +122,7 @@ export default function App() {
   // Inline Edit Finding Fix
   const [editingFixId, setEditingFixId] = useState(null);
   const [customFixText, setCustomFixText] = useState("");
+  const [showValidatorDetails, setShowValidatorDetails] = useState(false);
 
   // Reviewer State
   const [reviewerComment, setReviewerComment] = useState("");
@@ -2281,19 +2282,81 @@ export default function App() {
                       </div>
                     )}
 
-                    {/* Validator Stats (Real Counts) */}
-                    <div className="mt-4 p-3 bg-slate-100/70 rounded-xl border border-slate-200 flex items-center justify-between text-xs text-slate-700">
-                      <div className="flex items-center gap-2">
-                        <Shield className="w-4 h-4 text-blue-600" />
-                        <span>
-                          <strong>Validator:</strong> {activeDraft.findings?.length || 0} valid findings kept,{" "}
-                          {activeDraft.validatorRejected?.length || 0} dropped,{" "}
-                          {activeDraft.stats?.merged || activeDraft.stats?.merged_count || 0} merged
-                        </span>
+                    {/* Validator Stats (Real Counts) + Why dropped / merged expander */}
+                    <div className="mt-4 p-3 bg-slate-100/70 rounded-xl border border-slate-200 text-xs text-slate-700 space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <Shield className="w-4 h-4 text-blue-600 shrink-0" />
+                          <span>
+                            <strong>Validator:</strong> {activeDraft.findings?.length || 0} valid findings kept,{" "}
+                            {activeDraft.validatorRejected?.length || 0} dropped,{" "}
+                            {activeDraft.stats?.merged || activeDraft.stats?.merged_count || 0} merged
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[11px] text-slate-500 font-mono hidden sm:inline">
+                            Model: {serverInfo.modelName}
+                          </span>
+                          {((activeDraft.validatorRejected && activeDraft.validatorRejected.length > 0) ||
+                            (activeDraft.validatorMerged && activeDraft.validatorMerged.length > 0)) && (
+                            <button
+                              onClick={() => setShowValidatorDetails(!showValidatorDetails)}
+                              className="text-[11px] font-bold text-blue-600 hover:text-blue-800 underline flex items-center gap-0.5 cursor-pointer"
+                            >
+                              {showValidatorDetails ? "Hide details ▲" : "Why dropped / merged? ▼"}
+                            </button>
+                          )}
+                        </div>
                       </div>
-                      <span className="text-[11px] text-slate-500 font-mono">
-                        Model: {serverInfo.modelName}
-                      </span>
+
+                      {/* Collapsible Why Dropped / Merged Expander Card */}
+                      {showValidatorDetails && (
+                        <div className="pt-2 border-t border-slate-200/80 space-y-2.5">
+                          {/* Dropped items */}
+                          {activeDraft.validatorRejected && activeDraft.validatorRejected.length > 0 && (
+                            <div className="space-y-1.5">
+                              <span className="text-[11px] font-bold uppercase tracking-wider text-rose-700 block">
+                                Dropped by Validator ({activeDraft.validatorRejected.length}):
+                              </span>
+                              <div className="space-y-1">
+                                {activeDraft.validatorRejected.map((item, idx) => (
+                                  <div key={idx} className="p-2 bg-rose-50/80 border border-rose-200 rounded-lg text-[11px]">
+                                    <div className="flex items-center justify-between font-semibold text-rose-900">
+                                      <span className="font-mono">[{item.rule_id || item.finding?.rule_id || "R-??"}]</span>
+                                      <span className="text-slate-600 italic font-normal">"{item.quote || item.finding?.quote || "text"}"</span>
+                                    </div>
+                                    <div className="text-rose-700 mt-0.5">
+                                      {(item.reasons || ["Dropped by governance filter"]).join(" • ")}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Merged items */}
+                          {activeDraft.validatorMerged && activeDraft.validatorMerged.length > 0 && (
+                            <div className="space-y-1.5">
+                              <span className="text-[11px] font-bold uppercase tracking-wider text-blue-700 block">
+                                Merged by Validator ({activeDraft.validatorMerged.length}):
+                              </span>
+                              <div className="space-y-1">
+                                {activeDraft.validatorMerged.map((item, idx) => (
+                                  <div key={idx} className="p-2 bg-blue-50/80 border border-blue-200 rounded-lg text-[11px]">
+                                    <div className="flex items-center justify-between font-semibold text-blue-900">
+                                      <span className="font-mono">[{item.rule_id || "MERGE"}]</span>
+                                      <span className="text-slate-600 italic font-normal">"{item.originalQuote || item.quote}"</span>
+                                    </div>
+                                    <div className="text-blue-700 mt-0.5">
+                                      {item.reason || `Merged into longest span "${item.mergedIntoQuote || item.quote}"`}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
 
                     {/* Reviewer Comments thread if any */}

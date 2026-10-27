@@ -2,94 +2,81 @@
  * Prompt Injection & Adversarial Instruction Scanner
  * Runs deterministically before any AI review step.
  * Enforces:
- * - Max one SEC-01 per text block/line
+ * - One SEC-01 finding per banner / text block.
+ * - If several injection phrases are in the banner, shows ONE finding listing all phrases.
  * - Action "remove" with no replacement text (suggested_fix = "")
  * - needs_human_judgement = true on every SEC-01
  */
 
 const INJECTION_PATTERNS = [
-  /\bignore\s+(all\s+)?(previous|prior|above|system|brand)?\s*(instructions|rules|guidelines|prompts)\b/i,
-  /\bapprove\s+(this\s+)?(draft|banner|post|copy|content)\s*(without|with no)?\s*(findings|errors|issues|violations)?\b/i,
-  /\bapprove\s+this\s+banner\b/i,
-  /\bapprove\s+this\s+draft\b/i,
-  /\bdisregard\s+(all\s+)?(rules|instructions|guidelines)\b/i,
-  /\b100%\s+compliant\b/i,
-  /\bno\s+findings\s+detected\b/i,
-  /\bbypass\s+(ai\s+)?(governance|validator|review|safety)\b/i,
-  /\bdo\s+not\s+(flag|report|review|check)\b/i,
-  /\byou\s+must\s+approve\b/i,
-  /\bpretend\s+there\s+are\s+no\s+(rules|violations)\b/i
+  /\bignore\s+(all\s+)?(previous|prior|above|system|brand)?\s*(instructions|rules|guidelines|prompts)\b/gi,
+  /\bapprove\s+(this\s+)?(draft|banner|post|copy|content)\s*(without|with no)?\s*(findings|errors|issues|violations)?\b/gi,
+  /\bapprove\s+this\s+(banner|draft)\b/gi,
+  /\bdisregard\s+(all\s+)?(rules|instructions|guidelines)\b/gi,
+  /\b100%\s+compliant\b/gi,
+  /\bno\s+findings\s+detected\b/gi,
+  /\bbypass\s+(ai\s+)?(governance|validator|review|safety)\b/gi,
+  /\bdo\s+not\s+(flag|report|review|check)\b/gi,
+  /\byou\s+must\s+approve\b/gi,
+  /\bpretend\s+there\s+are\s+no\s+(rules|violations)\b/gi,
+  /\bsystem\s+override\b/gi
 ];
 
 export function detectPromptInjection(text) {
   if (!text || typeof text !== "string") return [];
 
-  const findings = [];
-  // Split into distinct text blocks (lines or paragraphs)
+  const matchedPhrases = [];
+  const matchedSpans = [];
+
+  for (const pattern of INJECTION_PATTERNS) {
+    // Reset regex index
+    pattern.lastIndex = 0;
+    let match;
+    while ((match = pattern.exec(text)) !== null) {
+      const phrase = match[0].trim();
+      if (!matchedPhrases.some(p => p.toLowerCase() === phrase.toLowerCase())) {
+        matchedPhrases.push(phrase);
+      }
+    }
+  }
+
+  if (matchedPhrases.length === 0) {
+    return [];
+  }
+
+  // Find the sentence or block containing the first injection
   const blocks = text.split(/\r?\n+/).map(b => b.trim()).filter(Boolean);
-
-  for (let bIdx = 0; bIdx < blocks.length; bIdx++) {
-    const block = blocks[bIdx];
-    let matchedPattern = null;
-    let matchedQuote = null;
-
-    for (const pattern of INJECTION_PATTERNS) {
-      const match = block.match(pattern);
-      if (match) {
-        matchedPattern = pattern;
-        matchedQuote = match[0];
-        break; // Max one SEC-01 per text block
-      }
-    }
-
-    if (matchedQuote) {
-      // Use the full sentence or clause in the block for maximum context
-      let span = block;
-      if (block.length > 120) {
-        // If block is very long, extract the sentence containing the match
-        const sentences = block.split(/(?<=[.!?])\s+/);
-        const containing = sentences.find(s => matchedPattern.test(s));
-        if (containing) span = containing.trim();
-      }
-
-      findings.push({
-        id: `sec-${Date.now()}-${findings.length}`,
-        rule_id: "SEC-01",
-        quote: span,
-        category: "security",
-        severity: "high",
-        explanation: "Possible prompt injection: text attempts to instruct the reviewer.",
-        suggested_fix: "",
-        action: "remove",
-        needs_human_judgement: true,
-        status: "pending",
-        source: "security"
-      });
+  let primarySpan = matchedPhrases[0];
+  for (const block of blocks) {
+    if (matchedPhrases.some(p => block.toLowerCase().includes(p.toLowerCase()))) {
+      primarySpan = block;
+      break;
     }
   }
 
-  // Fallback: If text had no newlines but contains injection pattern
-  if (findings.length === 0) {
-    for (const pattern of INJECTION_PATTERNS) {
-      const match = text.match(pattern);
-      if (match) {
-        findings.push({
-          id: `sec-${Date.now()}-0`,
-          rule_id: "SEC-01",
-          quote: match[0],
-          category: "security",
-          severity: "high",
-          explanation: "Possible prompt injection: text attempts to instruct the reviewer.",
-          suggested_fix: "",
-          action: "remove",
-          needs_human_judgement: true,
-          status: "pending",
-          source: "security"
-        });
-        break;
-      }
-    }
+  // Formulate explanation listing the phrases
+  let explanation = "Possible prompt injection: text attempts to instruct the reviewer.";
+  if (matchedPhrases.length > 1) {
+    explanation = `Possible prompt injection: text attempts to instruct the reviewer (detected phrases: "${matchedPhrases.join('", "')}").`;
+  } else {
+    explanation = `Possible prompt injection: text attempts to instruct the reviewer ("${matchedPhrases[0]}").`;
   }
 
-  return findings;
+  // Exactly one SEC-01 finding listing the phrases
+  return [
+    {
+      id: `sec-${Date.now()}-0`,
+      rule_id: "SEC-01",
+      quote: primarySpan,
+      category: "security",
+      severity: "high",
+      explanation,
+      suggested_fix: "",
+      action: "remove",
+      needs_human_judgement: true,
+      status: "pending",
+      source: "security",
+      injection_phrases: matchedPhrases
+    }
+  ];
 }

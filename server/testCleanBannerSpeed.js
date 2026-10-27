@@ -4,11 +4,10 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { runVisualAudit } from './visualAuditor.js';
 
-dotenv.config();
-const apiKey = process.env.GEMINI_API_KEY;
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+dotenv.config({ path: path.join(__dirname, '.env') });
+const apiKey = process.env.GEMINI_API_KEY;
 
 const cleanBannerPath = path.join(__dirname, '../client/public/samples/clean-banner.png');
 const imageBuffer = fs.readFileSync(cleanBannerPath);
