@@ -41,6 +41,38 @@ export const INITIAL_RULES = [
   }
 ];
 
+export const INITIAL_VISUAL_SETTINGS = {
+  palette: ["#1D4ED8", "#0F172A", "#FFFFFF", "#F59E0B"],
+  minContrastRatio: 4.5,
+  disclaimerPhrase: "",
+  rules: [
+    {
+      id: "V-01",
+      category: "accessibility",
+      text: "Text must meet the minimum contrast ratio",
+      severity: "high"
+    },
+    {
+      id: "V-02",
+      category: "brand",
+      text: "Use only brand palette colours",
+      severity: "medium"
+    },
+    {
+      id: "V-03",
+      category: "accessibility",
+      text: "Every image needs alt text",
+      severity: "medium"
+    },
+    {
+      id: "V-04",
+      category: "claim",
+      text: "If a disclaimer phrase is set, it must appear in the image text",
+      severity: "high"
+    }
+  ]
+};
+
 export const INITIAL_FACTS = [
   {
     id: "F-01",

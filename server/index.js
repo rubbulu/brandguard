@@ -3,10 +3,11 @@ import cors from "cors";
 import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
-import { INITIAL_RULES, INITIAL_FACTS, SAMPLE_DRAFTS } from "./demoData.js";
+import { INITIAL_RULES, INITIAL_FACTS, SAMPLE_DRAFTS, INITIAL_VISUAL_SETTINGS } from "./demoData.js";
 import { callGeminiReview, ACTIVE_MODEL } from "./geminiService.js";
 import { validateFindings } from "./validator.js";
 import { loadWorkspace, saveWorkspace, resetWorkspace } from "./workspaceStore.js";
+import { runVisualAudit } from "./visualAuditor.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,11 +20,17 @@ const PORT = process.env.PORT || 5000;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "15mb" }));
 
 // Serve client production build if available
 const clientDist = path.join(__dirname, "../client/dist");
 app.use(express.static(clientDist));
+const clientPublic = path.join(__dirname, "../client/public");
+app.use(express.static(clientPublic));
+
+// Serve workspace compressed images
+const workspaceImagesDir = path.join(__dirname, "data", "workspaces", "images");
+app.use("/api/workspaces/images", express.static(workspaceImagesDir));
 
 // --- Rate Limiting per Workspace (10 reviews per minute) ---
 const reviewRateLimits = new Map(); // workspaceId -> array of timestamps
@@ -43,13 +50,17 @@ function checkRateLimit(workspaceId) {
 }
 
 // --- Workspace Middleware ---
-app.use("/api", (req, res, next) => {
+const workspaceMiddleware = (req, res, next) => {
   const workspaceId = req.headers["x-workspace-id"] || req.query.workspaceId || "default";
   req.workspaceId = typeof workspaceId === "string" ? workspaceId : "default";
   req.workspace = loadWorkspace(req.workspaceId);
   req.saveWs = () => saveWorkspace(req.workspaceId, req.workspace);
   next();
-});
+};
+
+app.use("/api", workspaceMiddleware);
+app.use("/visual-review", workspaceMiddleware);
+app.use("/visual-settings", workspaceMiddleware);
 
 // --- 1. Health Check & Config ---
 app.get("/api/health", (req, res) => {
@@ -182,6 +193,35 @@ app.delete("/api/facts/:id", (req, res) => {
   req.workspace.facts = req.workspace.facts.filter(f => f.id !== factId);
   req.saveWs();
   res.json({ message: `Fact ${factId} deleted`, facts: req.workspace.facts });
+});
+
+// --- 3b. Visual Settings & Brand Palette ---
+app.get(["/api/visual-settings", "/visual-settings"], (req, res) => {
+  res.json(req.workspace.visualSettings || INITIAL_VISUAL_SETTINGS);
+});
+
+app.put(["/api/visual-settings", "/visual-settings"], (req, res) => {
+  const { palette, minContrastRatio, disclaimerPhrase, rules } = req.body;
+  if (!req.workspace.visualSettings) {
+    req.workspace.visualSettings = JSON.parse(JSON.stringify(INITIAL_VISUAL_SETTINGS));
+  }
+  if (Array.isArray(palette)) {
+    req.workspace.visualSettings.palette = palette.map(c => c.trim().toUpperCase());
+  }
+  if (typeof minContrastRatio === "number" || !isNaN(Number(minContrastRatio))) {
+    req.workspace.visualSettings.minContrastRatio = Math.max(1, Math.min(21, Number(minContrastRatio)));
+  }
+  if (typeof disclaimerPhrase === "string") {
+    req.workspace.visualSettings.disclaimerPhrase = disclaimerPhrase.trim();
+  }
+  if (Array.isArray(rules)) {
+    req.workspace.visualSettings.rules = rules;
+  }
+  req.saveWs();
+  res.json({
+    message: "Visual settings updated successfully",
+    visualSettings: req.workspace.visualSettings
+  });
 });
 
 // --- 4. Workspace Reset & Sample Drafts ---
@@ -332,6 +372,131 @@ app.post("/api/review", async (req, res) => {
   }
 });
 
+// --- 6b. Visual Review Endpoint (Banner / Image Review) ---
+app.post(["/api/visual-review", "/visual-review"], async (req, res) => {
+  try {
+    // 1. Enforce rate limit per workspace (same limiter as /review)
+    if (!checkRateLimit(req.workspaceId)) {
+      return res.status(429).json({
+        error: "Rate limit reached (10 checks per minute). Please wait a moment before running another check."
+      });
+    }
+
+    const { image, channel, draftTitle } = req.body;
+    if (!image) {
+      return res.status(400).json({ error: "Image data is required (base64 PNG, JPG, or WebP)." });
+    }
+
+    // Extract binary buffer from base64
+    let buffer;
+    try {
+      const base64Data = image.includes("base64,") ? image.split("base64,")[1] : image;
+      buffer = Buffer.from(base64Data, "base64");
+    } catch (parseErr) {
+      return res.status(400).json({ error: "Invalid base64 image data." });
+    }
+
+    // Validate size (max 4 MB)
+    if (buffer.length > 4 * 1024 * 1024) {
+      return res.status(400).json({ error: "Image file exceeds maximum allowed size of 4 MB." });
+    }
+
+    // Run Visual Audit pipeline
+    const auditResult = await runVisualAudit({
+      imageBuffer: buffer,
+      visualSettings: req.workspace.visualSettings,
+      rules: req.workspace.rules,
+      facts: req.workspace.facts,
+      apiKey: GEMINI_API_KEY,
+      workspaceId: req.workspaceId
+    });
+
+    // Create persistent visual draft in workspace
+    const newDraft = {
+      id: `visual-${Date.now()}`,
+      title: draftTitle?.trim() || "Marketing Banner Visual Audit",
+      channel: channel || "Social / Banner",
+      creator: "Visual Designer",
+      createdAt: new Date().toISOString(),
+      status: "reviewed",
+      isVisual: true,
+      imageUrl: auditResult.imageUrl,
+      originalText: auditResult.extracted_text,
+      currentText: auditResult.extracted_text,
+      altText: auditResult.alt_text,
+      hasLogo: auditResult.has_logo,
+      version: 1,
+      findings: auditResult.findings,
+      validatorRejected: [],
+      contrastResults: auditResult.contrast_results,
+      paletteSummary: auditResult.palette_summary,
+      regions: auditResult.regions,
+      history: [
+        {
+          id: `h-${Date.now()}`,
+          timestamp: new Date().toISOString(),
+          actor: "BrandGuard Visual Auditor",
+          action: `Visual audit completed (${auditResult.findings.length} findings kept, ${auditResult.stats.dropped_by_validator} dropped by validator)`
+        }
+      ],
+      comments: []
+    };
+
+    req.workspace.drafts.unshift(newDraft);
+    req.saveWs();
+
+    res.json({
+      draftId: newDraft.id,
+      draft: newDraft,
+      ...auditResult
+    });
+  } catch (err) {
+    console.error("[Visual Review Fatal Error]:", err);
+    const isClientErr = err.message.includes("format") || err.message.includes("size") || err.message.includes("Unreadable");
+    res.status(isClientErr ? 400 : 500).json({
+      error: err.message || "An unexpected error occurred during visual review."
+    });
+  }
+});
+
+// Update Alt-Text for Visual Draft
+app.patch("/api/drafts/:id/alt-text", (req, res) => {
+  const { id } = req.params;
+  const { altText } = req.body;
+  const draft = req.workspace.drafts.find(d => d.id === id);
+  if (!draft) return res.status(404).json({ error: "Draft not found." });
+
+  draft.altText = (altText || "").trim();
+  if (!draft.altText) {
+    if (!draft.findings.some(f => f.rule_id === "V-03")) {
+      draft.findings.push({
+        id: `finding-alt-${Date.now()}`,
+        rule_id: "V-03",
+        quote: "(Missing alt text)",
+        category: "accessibility",
+        severity: "medium",
+        explanation: "Every marketing image needs alt text for accessibility.",
+        suggested_fix: "Add descriptive alt text describing the visible banner content.",
+        needs_human_judgement: true,
+        source: "alt_text",
+        status: "pending"
+      });
+    }
+  } else {
+    draft.findings = draft.findings.filter(f => f.rule_id !== "V-03");
+  }
+
+  draft.history.push({
+    id: `h-${Date.now()}`,
+    timestamp: new Date().toISOString(),
+    actor: "Creator",
+    action: `Updated image alt-text: "${draft.altText || "(cleared)"}"`
+  });
+
+  req.saveWs();
+  res.json({ draft });
+});
+
 // Helper: Recompute currentText from originalText and active accepted/edited findings
 function recomputeDraftText(originalText, findings) {
   let text = originalText;
@@ -479,18 +644,34 @@ app.get("/api/insights", (req, res) => {
   const ruleMap = new Map();
   rules.forEach(r => ruleMap.set(r.id, r.text));
   facts.forEach(f => ruleMap.set(f.id, f.text));
+  if (req.workspace.visualSettings?.rules) {
+    req.workspace.visualSettings.rules.forEach(r => ruleMap.set(r.id, r.text));
+  }
 
   const ruleStats = {}; // rule_id -> { totalFlagged, accepted, edited, rejected }
   let totalFindings = 0;
+  let visualFindingsCount = 0;
+  let textFindingsCount = 0;
+  let visualDraftsCount = 0;
+  let textDraftsCount = 0;
   let totalAccepted = 0;
   let totalEdited = 0;
   let totalRejected = 0;
   let totalValidatorDropped = 0;
 
   for (const draft of drafts) {
+    if (draft.isVisual) visualDraftsCount++;
+    else textDraftsCount++;
+
     if (Array.isArray(draft.findings)) {
       for (const f of draft.findings) {
         totalFindings++;
+        if (f.source && f.source !== "text") {
+          visualFindingsCount++;
+        } else {
+          textFindingsCount++;
+        }
+
         if (!ruleStats[f.rule_id]) {
           ruleStats[f.rule_id] = { totalFlagged: 0, accepted: 0, edited: 0, rejected: 0 };
         }
@@ -554,7 +735,11 @@ app.get("/api/insights", (req, res) => {
 
   res.json({
     draftsAnalysed: drafts.length,
+    textDraftsCount,
+    visualDraftsCount,
     findingsFlagged: totalFindings,
+    textFindingsCount,
+    visualFindingsCount,
     findingsAccepted: totalAccepted,
     findingsEdited: totalEdited,
     findingsRejected: totalRejected,

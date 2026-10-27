@@ -21,7 +21,7 @@ yarn-error.log*
 *.log
 
 # Workspace data
-server/data/workspaces/*.json
+server/data/
 scratch/
 page_*.png
 

@@ -22,7 +22,12 @@ import {
   Plus,
   RotateCcw,
   Save,
-  ArrowRight
+  ArrowRight,
+  Image as ImageIcon,
+  Palette,
+  Eye,
+  Upload,
+  Trash2
 } from "lucide-react";
 
 // Get or initialize persistent Workspace ID for this browser visitor
@@ -44,6 +49,9 @@ export default function App() {
     return ["manager", "creator", "reviewer", "insights"].includes(hash) ? hash : "creator";
   });
 
+  // Creator Mode Toggle: "text" | "visual"
+  const [creatorMode, setCreatorMode] = useState("text");
+
   // Server & Health Status
   const [serverStatus, setServerStatus] = useState("connecting"); // 'connected' | 'waking' | 'offline'
   const [serverInfo, setServerInfo] = useState({ modelName: "Gemini 3.5 Flash", version: "2.1.0" });
@@ -57,7 +65,21 @@ export default function App() {
   const [facts, setFacts] = useState([]);
   const [sampleDrafts, setSampleDrafts] = useState([]);
 
-  // Creator & Review State
+  // Brand Visual Settings (Brand Manager)
+  const [visualSettings, setVisualSettings] = useState({
+    palette: ["#1D4ED8", "#0F172A", "#FFFFFF", "#F59E0B"],
+    minContrastRatio: 4.5,
+    disclaimerPhrase: "",
+    rules: [
+      { id: "V-01", category: "accessibility", text: "Text must meet the minimum contrast ratio", severity: "high" },
+      { id: "V-02", category: "brand", text: "Use only brand palette colours", severity: "medium" },
+      { id: "V-03", category: "accessibility", text: "Every image needs alt text", severity: "medium" },
+      { id: "V-04", category: "claim", text: "If a disclaimer phrase is set, it must appear in the image text", severity: "high" }
+    ]
+  });
+  const [newColorHex, setNewColorHex] = useState("#2563EB");
+
+  // Creator & Review State (Text)
   const [draftTitle, setDraftTitle] = useState("");
   const [draftChannel, setDraftChannel] = useState("Social Media / Twitter");
   const [draftContent, setDraftContent] = useState("");
@@ -66,6 +88,24 @@ export default function App() {
   const [isReviewing, setIsReviewing] = useState(false);
   const [reviewError, setReviewError] = useState(null);
   const [selectedFindingId, setSelectedFindingId] = useState(null);
+
+  // Creator & Review State (Visual Audit)
+  const [isVisualAuditing, setIsVisualAuditing] = useState(false);
+  const [visualAuditError, setVisualAuditError] = useState(null);
+  const [visualImagePreview, setVisualImagePreview] = useState(null);
+  const [hoveredRegionIdx, setHoveredRegionIdx] = useState(null);
+  const [editableAltText, setEditableAltText] = useState("");
+  const [isDragging, setIsDragging] = useState(false);
+  const [copiedItem, setCopiedItem] = useState(null);
+  const fileInputRef = useRef(null);
+
+  const handleCopyText = (text, id) => {
+    if (navigator?.clipboard?.writeText) {
+      navigator.clipboard.writeText(text);
+      setCopiedItem(id);
+      setTimeout(() => setCopiedItem(null), 2000);
+    }
+  };
 
   // Inline Edit Finding Fix
   const [editingFixId, setEditingFixId] = useState(null);
@@ -156,12 +196,13 @@ export default function App() {
 
   const loadWorkspaceData = async () => {
     try {
-      const [rulesRes, factsRes, samplesRes, draftsRes, insightsRes] = await Promise.all([
+      const [rulesRes, factsRes, samplesRes, draftsRes, insightsRes, visualRes] = await Promise.all([
         wsFetch("/api/rules"),
         wsFetch("/api/facts"),
         wsFetch("/api/sample-drafts"),
         wsFetch("/api/drafts"),
-        wsFetch("/api/insights")
+        wsFetch("/api/insights"),
+        wsFetch("/api/visual-settings")
       ]);
 
       if (rulesRes.ok) setRules(await rulesRes.json());
@@ -171,14 +212,154 @@ export default function App() {
         const dList = await draftsRes.json();
         setAllDrafts(dList);
         if (dList.length > 0) {
-          setActiveDraft(dList[0]);
+          setActiveDraft((prev) => (prev ? dList.find((d) => d.id === prev.id) || dList[0] : dList[0]));
         } else {
           setActiveDraft(null);
         }
       }
       if (insightsRes.ok) setInsights(await insightsRes.json());
+      if (visualRes && visualRes.ok) setVisualSettings(await visualRes.json());
     } catch (e) {
       console.error("Error loading workspace data", e);
+    }
+  };
+
+  // Save Brand Visual Settings
+  const handleSaveVisualSettings = async (updated) => {
+    try {
+      const res = await wsFetch("/api/visual-settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(updated || visualSettings)
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setVisualSettings(data.visualSettings);
+        showNotice("Visual brand settings saved successfully.");
+      }
+    } catch (e) {
+      console.error("Failed to save visual settings", e);
+    }
+  };
+
+  const handleAddPaletteColor = () => {
+    const hex = newColorHex.trim().toUpperCase();
+    if (!/^#[0-9A-F]{6}$/i.test(hex)) {
+      alert("Please enter a valid 6-character hex color (e.g. #1D4ED8).");
+      return;
+    }
+    if (visualSettings.palette.includes(hex)) return;
+    const updated = {
+      ...visualSettings,
+      palette: [...visualSettings.palette, hex]
+    };
+    setVisualSettings(updated);
+    handleSaveVisualSettings(updated);
+  };
+
+  const handleRemovePaletteColor = (colorToRemove) => {
+    if (visualSettings.palette.length <= 1) {
+      alert("At least one brand palette color is required.");
+      return;
+    }
+    const updated = {
+      ...visualSettings,
+      palette: visualSettings.palette.filter((c) => c !== colorToRemove)
+    };
+    setVisualSettings(updated);
+    handleSaveVisualSettings(updated);
+  };
+
+  // Run Visual Audit on uploaded image or sample banner
+  const handleRunVisualAudit = async (base64Image, title = "Visual Banner Audit", channel = "Social / Display Banner") => {
+    setIsVisualAuditing(true);
+    setVisualAuditError(null);
+    setVisualImagePreview(base64Image);
+
+    try {
+      const res = await wsFetch("/api/visual-review", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          image: base64Image,
+          draftTitle: title,
+          channel: channel
+        })
+      });
+
+      if (res.status === 429) {
+        const err = await res.json();
+        throw new Error(err.error || "Rate limit reached (10 checks per minute). Please wait a moment.");
+      }
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "Failed to analyze image.");
+      }
+
+      const data = await res.json();
+      setActiveDraft(data.draft);
+      setEditableAltText(data.alt_text || "");
+      await loadWorkspaceData();
+      showNotice(`Visual audit completed: ${data.findings.length} findings flagged.`);
+    } catch (err) {
+      setVisualAuditError(err.message);
+    } finally {
+      setIsVisualAuditing(false);
+    }
+  };
+
+  // Load Sample Banner Preset
+  const handleLoadSampleBanner = async (sampleFileName, label) => {
+    setCreatorMode("visual");
+    setIsVisualAuditing(true);
+    setVisualAuditError(null);
+    try {
+      const response = await fetch(`/samples/${sampleFileName}`);
+      if (!response.ok) throw new Error(`Could not load sample banner ${sampleFileName}`);
+      const blob = await response.blob();
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        handleRunVisualAudit(reader.result, label, "Social / Banner");
+      };
+      reader.readAsDataURL(blob);
+    } catch (e) {
+      setIsVisualAuditing(false);
+      setVisualAuditError(e.message);
+    }
+  };
+
+  // Handle Drag & Drop / File Upload
+  const handleImageFileUpload = (file) => {
+    if (!file) return;
+    if (file.size > 4 * 1024 * 1024) {
+      setVisualAuditError("Image exceeds 4 MB maximum size limit.");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      handleRunVisualAudit(reader.result, file.name.replace(/\.[^/.]+$/, ""), "Social / Display Banner");
+    };
+    reader.readAsDataURL(file);
+  };
+
+  // Save Alt-Text for active visual draft
+  const handleSaveAltText = async () => {
+    if (!activeDraft) return;
+    try {
+      const res = await wsFetch(`/api/drafts/${activeDraft.id}/alt-text`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ altText: editableAltText })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setActiveDraft(data.draft);
+        await loadWorkspaceData();
+        showNotice("Image alt-text updated.");
+      }
+    } catch (e) {
+      console.error(e);
     }
   };
 
@@ -561,6 +742,281 @@ export default function App() {
     }
 
     return <div className="leading-relaxed text-slate-800 text-sm whitespace-pre-wrap">{result}</div>;
+  };
+
+  // Helper: Render Audited Banner Image with Interactive Bounding Boxes
+  const renderBannerImageWithBoxes = (draft, preview) => {
+    if (!draft) return null;
+    const imgSrc = preview || draft.imagePath;
+
+    return (
+      <div className="relative w-full overflow-hidden rounded-xl bg-slate-950 flex items-center justify-center p-2 border border-slate-200">
+        <div className="relative inline-block max-w-full">
+          {imgSrc ? (
+            <img
+              src={imgSrc}
+              alt={draft.altText || "Audited banner"}
+              className="max-h-[440px] w-auto max-w-full object-contain rounded-lg block"
+            />
+          ) : (
+            <div className="h-64 flex items-center justify-center text-slate-400 text-xs">
+              Banner image not available
+            </div>
+          )}
+
+          {/* Bounding box overlays */}
+          {draft.regions?.map((reg, idx) => {
+            const isHovered = hoveredRegionIdx === idx;
+            const isFindingSelected =
+              selectedFindingId &&
+              draft.findings?.some(
+                (f) =>
+                  f.id === selectedFindingId &&
+                  ((f.quote && reg.text && f.quote.toLowerCase().includes(reg.text.toLowerCase())) ||
+                    (f.explanation && f.explanation.includes(reg.text)))
+              );
+            const hasContrastFail = reg.passesContrast === false;
+
+            return (
+              <div
+                key={idx}
+                onMouseEnter={() => setHoveredRegionIdx(idx)}
+                onMouseLeave={() => setHoveredRegionIdx(null)}
+                style={{
+                  position: "absolute",
+                  left: `${(reg.x || 0) * 100}%`,
+                  top: `${(reg.y || 0) * 100}%`,
+                  width: `${(reg.w || 0) * 100}%`,
+                  height: `${(reg.h || 0) * 100}%`
+                }}
+                className={`cursor-pointer transition-all border-2 rounded-xs ${
+                  isHovered || isFindingSelected
+                    ? "border-blue-500 bg-blue-500/30 ring-2 ring-blue-400 z-30"
+                    : hasContrastFail
+                    ? "border-red-500 bg-red-500/20 z-10"
+                    : "border-emerald-400 bg-emerald-400/10 z-10"
+                }`}
+                title={`Region #${idx + 1}: "${reg.text}" (${reg.contrastRatio ? reg.contrastRatio + ':1' : 'could not measure'})`}
+              >
+                <span
+                  className={`absolute -top-4 left-0 text-[9px] font-bold px-1 rounded font-mono shadow-xs ${
+                    hasContrastFail ? "bg-red-600 text-white" : "bg-emerald-700 text-white"
+                  }`}
+                >
+                  #{idx + 1} {reg.contrastRatio ? `${reg.contrastRatio}:1` : ""}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  // Helper: Render Colour and Contrast Governance Card
+  const renderColourAndContrastCard = (draft) => {
+    if (!draft) return null;
+    const paletteCheck = draft.paletteCheck;
+    const offPercent = paletteCheck?.offPalettePercentage || 0;
+    const onPercent = Math.max(0, 100 - offPercent);
+
+    return (
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs p-4 sm:p-5 space-y-4">
+        <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+          <div className="flex items-center gap-2">
+            <Palette className="w-4 h-4 text-blue-600" />
+            <h3 className="font-bold text-slate-900 text-sm">Colour &amp; Contrast Governance</h3>
+          </div>
+          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">
+            WCAG AA &amp; Brand Palette
+          </span>
+        </div>
+
+        {/* Brand Palette Match */}
+        <div>
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-xs font-bold text-slate-700">Brand Palette Match (Rule V-02):</span>
+            {paletteCheck?.flagged ? (
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 flex items-center gap-1">
+                <AlertTriangle className="w-3 h-3" /> Flagged ({offPercent}% off-palette)
+              </span>
+            ) : (
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
+                ✓ Compliant ({onPercent}% on-palette)
+              </span>
+            )}
+          </div>
+
+          {/* Brand Swatches */}
+          <div className="flex flex-wrap items-center gap-1.5 mb-2">
+            <span className="text-[11px] text-slate-500 mr-1">Brand Colours:</span>
+            {(visualSettings.palette || []).map((hex) => (
+              <span key={hex} className="inline-flex items-center gap-1 text-[11px] font-mono px-1.5 py-0.5 bg-slate-50 border border-slate-200 rounded">
+                <span className="w-3 h-3 rounded-full border border-slate-300" style={{ backgroundColor: hex }} />
+                {hex}
+              </span>
+            ))}
+          </div>
+
+          {/* If off-palette flagged, show dominant 3 off colors */}
+          {paletteCheck?.flagged && paletteCheck?.dominantOffColors?.length > 0 && (
+            <div className="p-2.5 bg-amber-50/70 border border-amber-200 rounded-xl text-xs space-y-1.5">
+              <span className="text-amber-900 font-bold block">
+                3 Most Common Off-Palette Colours:
+              </span>
+              <div className="flex flex-wrap gap-2">
+                {paletteCheck.dominantOffColors.map((offHex, idx) => (
+                  <span key={idx} className="inline-flex items-center gap-1.5 font-mono text-[11px] bg-white px-2 py-1 rounded border border-amber-300 shadow-2xs">
+                    <span className="w-3.5 h-3.5 rounded-sm border border-slate-300" style={{ backgroundColor: offHex }} />
+                    <strong className="text-slate-800">{offHex}</strong>
+                  </span>
+                ))}
+              </div>
+              <p className="text-[11px] text-amber-800 italic mt-0.5">
+                Flagged as needs human judgement because photographic assets legitimately include other colours.
+              </p>
+            </div>
+          )}
+        </div>
+
+        {/* Typography Contrast Ratios per Region */}
+        <div className="pt-3 border-t border-slate-100">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-bold text-slate-700">
+              Typography Contrast Ratios (Rule V-01):
+            </span>
+            <span className="text-[11px] text-slate-500 font-mono">
+              Min Target: {visualSettings.minContrastRatio || 4.5}:1
+            </span>
+          </div>
+
+          {(!draft.regions || draft.regions.length === 0) ? (
+            <p className="text-xs text-slate-400 italic">No text regions detected in image.</p>
+          ) : (
+            <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+              {draft.regions.map((reg, idx) => {
+                const isPassed = reg.passesContrast !== false && reg.contrastRatio && reg.contrastRatio >= (visualSettings.minContrastRatio || 4.5);
+                const isHovered = hoveredRegionIdx === idx;
+
+                return (
+                  <div
+                    key={idx}
+                    onMouseEnter={() => setHoveredRegionIdx(idx)}
+                    onMouseLeave={() => setHoveredRegionIdx(null)}
+                    className={`p-2.5 rounded-xl border text-xs transition-all ${
+                      isHovered
+                        ? "border-blue-500 bg-blue-50/50"
+                        : isPassed
+                        ? "border-slate-200 bg-slate-50/60"
+                        : "border-red-200 bg-red-50/40"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="font-bold text-slate-800 flex items-center gap-1.5">
+                        <span className="w-4 h-4 rounded-full bg-slate-200 text-slate-700 text-[10px] flex items-center justify-center font-mono">
+                          {idx + 1}
+                        </span>
+                        <span className="truncate max-w-[200px]">"{reg.text}"</span>
+                      </span>
+
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[10px] text-slate-400 font-mono">[estimated]</span>
+                        {reg.contrastRatio ? (
+                          <span
+                            className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                              isPassed ? "bg-emerald-100 text-emerald-800" : "bg-red-100 text-red-800 font-extrabold"
+                            }`}
+                          >
+                            {reg.contrastRatio}:1 {isPassed ? "✓ Pass" : "✕ Fail"}
+                          </span>
+                        ) : (
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">
+                            Could not measure
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {reg.fgColor && reg.bgColor && (
+                      <div className="flex items-center gap-3 text-[11px] text-slate-600 mt-1">
+                        <span className="flex items-center gap-1">
+                          Text: <span className="w-2.5 h-2.5 rounded-full border border-slate-300" style={{ backgroundColor: reg.fgColor }} />
+                          <code className="font-mono">{reg.fgColor}</code>
+                        </span>
+                        <span className="flex items-center gap-1">
+                          Bg: <span className="w-2.5 h-2.5 rounded-full border border-slate-300" style={{ backgroundColor: reg.bgColor }} />
+                          <code className="font-mono">{reg.bgColor}</code>
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  // Helper: Render Replacement Copy for the Designer
+  const renderDesignerCopyList = (draft) => {
+    if (!draft || !draft.findings) return null;
+    const fixableFindings = draft.findings.filter((f) => f.suggested_fix);
+    if (fixableFindings.length === 0) return null;
+
+    return (
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs p-4 sm:p-5 space-y-3">
+        <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+          <div className="flex items-center gap-2">
+            <Edit3 className="w-4 h-4 text-blue-600" />
+            <h4 className="font-bold text-slate-900 text-sm">Replacement Copy for the Designer</h4>
+          </div>
+          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700">
+            Figma / Artwork Handoff
+          </span>
+        </div>
+        <p className="text-xs text-slate-500">
+          Hand these verified replacements to your graphic or UI design team to update the banner artwork:
+        </p>
+
+        <div className="space-y-2">
+          {fixableFindings.map((f, i) => {
+            const designerLine = `Change "${f.quote}" to "${f.suggested_fix}"`;
+            const isCopied = copiedItem === `designer-${f.id || i}`;
+
+            return (
+              <div
+                key={f.id || i}
+                className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 flex items-center justify-between gap-2 text-xs"
+              >
+                <div className="font-mono text-slate-800 leading-snug">
+                  <span className="text-red-700 font-bold line-through mr-1">"{f.quote}"</span>
+                  <span className="text-slate-400 font-sans mr-1">&rarr;</span>
+                  <span className="text-emerald-700 font-bold">"{f.suggested_fix}"</span>
+                  <span className="text-[10px] text-slate-400 font-sans ml-2">[{f.rule_id}]</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleCopyText(designerLine, `designer-${f.id || i}`)}
+                  className="px-2.5 py-1 bg-white hover:bg-slate-100 border border-slate-200 rounded text-[11px] font-bold text-slate-700 transition-all flex items-center gap-1 shrink-0"
+                >
+                  {isCopied ? (
+                    <>
+                      <Check className="w-3 h-3 text-emerald-600" /> Copied
+                    </>
+                  ) : (
+                    <>
+                      <FileText className="w-3 h-3" /> Copy
+                    </>
+                  )}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
   };
 
   return (
@@ -950,124 +1406,442 @@ export default function App() {
                 </div>
               )}
             </div>
+
+            {/* Brand Visual Rules & Palette */}
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
+              <div className="p-4 sm:p-5 border-b border-slate-100 flex items-center justify-between">
+                <div>
+                  <h2 className="font-bold text-slate-900 text-base flex items-center gap-2">
+                    <Palette className="w-5 h-5 text-blue-600" />
+                    <span>Visual Rules & Brand Palette</span>
+                  </h2>
+                  <p className="text-xs text-slate-500">
+                    Governs approved banner colours, minimum WCAG text contrast ratios, and required disclaimers
+                  </p>
+                </div>
+              </div>
+
+              <div className="p-5 space-y-6">
+                {/* 1. Approved Brand Palette */}
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
+                    Approved Brand Palette Hex Colours
+                  </label>
+                  <div className="flex flex-wrap items-center gap-2.5 mb-3">
+                    {visualSettings.palette.map((color) => (
+                      <div
+                        key={color}
+                        className="flex items-center gap-2 px-3 py-1.5 bg-slate-50 rounded-xl border border-slate-200 shadow-2xs text-xs font-mono font-bold text-slate-800"
+                      >
+                        <span
+                          className="w-4 h-4 rounded-full border border-black/15 shrink-0 shadow-2xs"
+                          style={{ backgroundColor: color }}
+                        />
+                        <span>{color}</span>
+                        <button
+                          type="button"
+                          onClick={() => handleRemovePaletteColor(color)}
+                          className="text-slate-400 hover:text-red-600 p-0.5 rounded transition-colors"
+                          title={`Remove ${color}`}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Add Color Form */}
+                  <div className="flex items-center gap-2 max-w-sm">
+                    <input
+                      type="color"
+                      value={newColorHex}
+                      onChange={(e) => setNewColorHex(e.target.value.toUpperCase())}
+                      className="w-9 h-9 p-0.5 rounded-lg border border-slate-200 cursor-pointer bg-white shrink-0"
+                    />
+                    <input
+                      type="text"
+                      value={newColorHex}
+                      onChange={(e) => setNewColorHex(e.target.value.toUpperCase())}
+                      placeholder="#1D4ED8"
+                      maxLength={7}
+                      className="w-28 px-2.5 py-1.5 text-xs font-mono uppercase rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleAddPaletteColor}
+                      className="px-3 py-1.5 bg-blue-50 border border-blue-200 text-blue-700 hover:bg-blue-100 rounded-lg text-xs font-bold transition-all flex items-center gap-1"
+                    >
+                      <Plus className="w-3.5 h-3.5" /> Add Colour
+                    </button>
+                  </div>
+                </div>
+
+                {/* 2. Contrast & Disclaimer Settings Grid */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-4 border-t border-slate-100">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                      Minimum Text Contrast Ratio (WCAG AA)
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        min="1"
+                        max="21"
+                        step="0.1"
+                        value={visualSettings.minContrastRatio}
+                        onChange={(e) => {
+                          const val = Number(e.target.value);
+                          const updated = { ...visualSettings, minContrastRatio: val };
+                          setVisualSettings(updated);
+                          handleSaveVisualSettings(updated);
+                        }}
+                        className="w-28 px-3 py-2 text-xs rounded-xl border border-slate-200 font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                      <span className="text-xs text-slate-500">
+                        Default: <strong>4.5:1</strong> (WCAG AA Compliance)
+                      </span>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                      Optional Required Disclaimer Phrase
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. Terms and conditions apply"
+                      value={visualSettings.disclaimerPhrase || ""}
+                      onChange={(e) => {
+                        const updated = { ...visualSettings, disclaimerPhrase: e.target.value };
+                        setVisualSettings(updated);
+                        handleSaveVisualSettings(updated);
+                      }}
+                      className="w-full px-3 py-2 text-xs rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500 font-medium"
+                    />
+                    <span className="text-[11px] text-slate-400 mt-1 block">
+                      If set, triggers rule V-04 if missing in image copy.
+                    </span>
+                  </div>
+                </div>
+
+                {/* 3. Visual Rules Table */}
+                <div className="pt-4 border-t border-slate-100">
+                  <span className="text-xs font-bold text-slate-700 uppercase tracking-wider block mb-2">
+                    Enforced Visual Governance Rules ({visualSettings.rules.length})
+                  </span>
+                  <div className="border border-slate-200 rounded-xl overflow-hidden">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-slate-50 border-b border-slate-100 text-[11px] font-bold text-slate-500 uppercase">
+                          <th className="py-2.5 px-3">Rule ID</th>
+                          <th className="py-2.5 px-3">Category</th>
+                          <th className="py-2.5 px-3">Description</th>
+                          <th className="py-2.5 px-3">Severity</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {visualSettings.rules.map((vr) => (
+                          <tr key={vr.id} className="hover:bg-slate-50/50">
+                            <td className="py-2.5 px-3 font-mono font-bold text-blue-600">{vr.id}</td>
+                            <td className="py-2.5 px-3 capitalize text-slate-600 font-medium">{vr.category}</td>
+                            <td className="py-2.5 px-3 text-slate-800">{vr.text}</td>
+                            <td className="py-2.5 px-3">
+                              <span
+                                className={`px-2 py-0.5 rounded-full text-[10px] font-bold capitalize ${
+                                  vr.severity === "high"
+                                    ? "bg-red-50 text-red-700"
+                                    : "bg-amber-50 text-amber-700"
+                                }`}
+                              >
+                                {vr.severity}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         )}
 
         {/* ========================================================================= */}
-        {/* VIEW 2: CONTENT CREATOR (The Core Loop Mockup)                            */}
+        {/* VIEW 2: CONTENT CREATOR (Text Copy + Visual Banner Auditor)              */}
         {/* ========================================================================= */}
         {activeRole === "creator" && (
           <div className="space-y-6 animate-fade-in">
-            {/* Draft Submission Box */}
-            <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs p-5 sm:p-6">
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
-                <div>
-                  <h2 className="text-xl font-extrabold text-slate-900 tracking-tight">Draft Pre-Publication Check</h2>
-                  <p className="text-xs text-slate-500">
-                    Submit marketing copy to review against brand rules and verified facts.
-                  </p>
-                </div>
-
-                {/* Quick Test Draft Presets & Demo Scenario Button */}
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    onClick={handleLoadDemoScenario}
-                    className="px-3 py-1.5 bg-blue-50 border border-blue-200 text-blue-700 hover:bg-blue-100 rounded-lg text-xs font-bold flex items-center gap-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  >
-                    <Sparkles className="w-3.5 h-3.5" />
-                    Load Demo Scenario
-                  </button>
-
-                  <select
-                    onChange={(e) => {
-                      const found = sampleDrafts.find((s) => s.id === e.target.value);
-                      if (found) handleSelectSample(found);
-                    }}
-                    className="text-xs px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-slate-700 font-medium focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    defaultValue=""
-                  >
-                    <option value="" disabled>Quick Test Drafts...</option>
-                    {sampleDrafts.map((sample) => (
-                      <option key={sample.id} value={sample.id}>
-                        {sample.title}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+            {/* Mode Switcher Tabs */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-2.5 rounded-2xl border border-slate-200 shadow-2xs">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setCreatorMode("text")}
+                  className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${
+                    creatorMode === "text"
+                      ? "bg-blue-600 text-white shadow-xs"
+                      : "bg-slate-50 text-slate-600 hover:bg-slate-100 border border-slate-200"
+                  }`}
+                >
+                  <FileText className="w-4 h-4" />
+                  <span>Copy (text)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCreatorMode("visual")}
+                  className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${
+                    creatorMode === "visual"
+                      ? "bg-blue-600 text-white shadow-xs"
+                      : "bg-slate-50 text-slate-600 hover:bg-slate-100 border border-slate-200"
+                  }`}
+                >
+                  <ImageIcon className="w-4 h-4" />
+                  <span>Banner (image)</span>
+                </button>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">Draft Title</label>
-                  <input
-                    type="text"
-                    value={draftTitle}
-                    placeholder="e.g. CampusPro Product Launch"
-                    onChange={(e) => setDraftTitle(e.target.value)}
-                    className="w-full px-3 py-2 text-sm rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">Target Channel</label>
-                  <select
-                    value={draftChannel}
-                    onChange={(e) => setDraftChannel(e.target.value)}
-                    className="w-full px-3 py-2 text-sm rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  >
-                    <option value="Social Media / Twitter">Social Media / Twitter</option>
-                    <option value="Marketing Email">Marketing Email</option>
-                    <option value="Product Landing Page">Product Landing Page</option>
-                    <option value="Ad Copy / Banner">Ad Copy / Banner</option>
-                  </select>
-                </div>
-                <div className="flex items-end">
-                  <button
-                    onClick={handleRunAiCheck}
-                    disabled={isReviewing}
-                    className="w-full py-2.5 px-4 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-bold flex items-center justify-center gap-2 transition-all shadow-xs disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  >
-                    {isReviewing ? (
-                      <>
-                        <RefreshCw className="w-4 h-4 animate-spin" />
-                        Running AI Review & Validator...
-                      </>
-                    ) : (
-                      <>
-                        <Sparkles className="w-4 h-4" />
-                        Run BrandGuard AI Check
-                      </>
-                    )}
-                  </button>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">Draft Copy</label>
-                <textarea
-                  rows={3}
-                  value={draftContent}
-                  onChange={(e) => setDraftContent(e.target.value)}
-                  placeholder="Paste marketing copy, social post, or product description here... or click 'Load Demo Scenario' above."
-                  className="w-full p-3 text-sm rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500 font-sans"
-                />
-                <div className="flex items-center justify-between text-[11px] text-slate-400 mt-1">
-                  <span>Characters: {draftContent.length} | Words: {draftContent.trim().split(/\s+/).filter(Boolean).length}</span>
-                  <span className="text-slate-500">Rules active: {rules.length} | Facts active: {facts.length}</span>
-                </div>
-              </div>
-
-              {reviewError && (
-                <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 flex items-center gap-2">
-                  <AlertTriangle className="w-4 h-4 shrink-0" />
-                  <span>{reviewError}</span>
-                </div>
-              )}
+              <span className="text-xs text-slate-500 font-medium px-2">
+                {creatorMode === "text"
+                  ? "Review written copy against brand rules and verified facts"
+                  : "Visual Auditor: Contrast (WCAG AA), brand palette & disclaimer detection"}
+              </span>
             </div>
+
+            {/* TAB 1: TEXT DRAFT SUBMISSION */}
+            {creatorMode === "text" && (
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs p-5 sm:p-6">
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
+                  <div>
+                    <h2 className="text-xl font-extrabold text-slate-900 tracking-tight">Draft Pre-Publication Check</h2>
+                    <p className="text-xs text-slate-500">
+                      Submit marketing copy to review against brand rules and verified facts.
+                    </p>
+                  </div>
+
+                  {/* Quick Test Draft Presets & Demo Scenario Button */}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      onClick={handleLoadDemoScenario}
+                      className="px-3 py-1.5 bg-blue-50 border border-blue-200 text-blue-700 hover:bg-blue-100 rounded-lg text-xs font-bold flex items-center gap-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <Sparkles className="w-3.5 h-3.5" />
+                      Load Demo Scenario
+                    </button>
+
+                    <select
+                      onChange={(e) => {
+                        const found = sampleDrafts.find((s) => s.id === e.target.value);
+                        if (found) handleSelectSample(found);
+                      }}
+                      className="text-xs px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-slate-700 font-medium focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      defaultValue=""
+                    >
+                      <option value="" disabled>Quick Test Drafts...</option>
+                      {sampleDrafts.map((sample) => (
+                        <option key={sample.id} value={sample.id}>
+                          {sample.title}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">Draft Title</label>
+                    <input
+                      type="text"
+                      value={draftTitle}
+                      placeholder="e.g. CampusPro Product Launch"
+                      onChange={(e) => setDraftTitle(e.target.value)}
+                      className="w-full px-3 py-2 text-sm rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">Target Channel</label>
+                    <select
+                      value={draftChannel}
+                      onChange={(e) => setDraftChannel(e.target.value)}
+                      className="w-full px-3 py-2 text-sm rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="Social Media / Twitter">Social Media / Twitter</option>
+                      <option value="Marketing Email">Marketing Email</option>
+                      <option value="Product Landing Page">Product Landing Page</option>
+                      <option value="Ad Copy / Banner">Ad Copy / Banner</option>
+                    </select>
+                  </div>
+                  <div className="flex items-end">
+                    <button
+                      onClick={handleRunAiCheck}
+                      disabled={isReviewing}
+                      className="w-full py-2.5 px-4 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-bold flex items-center justify-center gap-2 transition-all shadow-xs disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      {isReviewing ? (
+                        <>
+                          <RefreshCw className="w-4 h-4 animate-spin" />
+                          Running AI Review &amp; Validator...
+                        </>
+                      ) : (
+                        <>
+                          <Sparkles className="w-4 h-4" />
+                          Run BrandGuard AI Check
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Draft Copy</label>
+                  <textarea
+                    rows={3}
+                    value={draftContent}
+                    onChange={(e) => setDraftContent(e.target.value)}
+                    placeholder="Paste marketing copy, social post, or product description here... or click 'Load Demo Scenario' above."
+                    className="w-full p-3 text-sm rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500 font-sans"
+                  />
+                  <div className="flex items-center justify-between text-[11px] text-slate-400 mt-1">
+                    <span>Characters: {draftContent.length} | Words: {draftContent.trim().split(/\s+/).filter(Boolean).length}</span>
+                    <span className="text-slate-500">Rules active: {rules.length} | Facts active: {facts.length}</span>
+                  </div>
+                </div>
+
+                {reviewError && (
+                  <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 shrink-0" />
+                    <span>{reviewError}</span>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* TAB 2: VISUAL BANNER AUDITOR SUBMISSION */}
+            {creatorMode === "visual" && (
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs p-5 sm:p-6 space-y-4">
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                  <div>
+                    <h2 className="text-xl font-extrabold text-slate-900 tracking-tight flex items-center gap-2">
+                      <ImageIcon className="w-5 h-5 text-blue-600" />
+                      Visual Banner Auditor
+                    </h2>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Upload display ads or marketing banners (PNG, JPG, WebP &le; 4 MB). The image is sent to Google Gemini for analysis.
+                    </p>
+                  </div>
+
+                  {/* Quick-test buttons */}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mr-1">
+                      Quick Tests:
+                    </span>
+                    <button
+                      type="button"
+                      disabled={isVisualAuditing}
+                      onClick={() => handleLoadSampleBanner("bad-banner.png", "Sample Bad Banner")}
+                      className="px-3 py-1.5 bg-red-50 border border-red-200 text-red-700 hover:bg-red-100 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all disabled:opacity-50"
+                    >
+                      <AlertTriangle className="w-3.5 h-3.5" />
+                      Try Bad Banner
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isVisualAuditing}
+                      onClick={() => handleLoadSampleBanner("clean-banner.png", "Sample Clean Banner")}
+                      className="px-3 py-1.5 bg-emerald-50 border border-emerald-200 text-emerald-700 hover:bg-emerald-100 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all disabled:opacity-50"
+                    >
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      Try Clean Banner
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isVisualAuditing}
+                      onClick={() => handleLoadSampleBanner("injection-banner.png", "Sample Prompt Injection Banner")}
+                      className="px-3 py-1.5 bg-purple-50 border border-purple-200 text-purple-700 hover:bg-purple-100 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all disabled:opacity-50"
+                    >
+                      <Shield className="w-3.5 h-3.5" />
+                      Try Injection Banner
+                    </button>
+                  </div>
+                </div>
+
+                {/* Drag-and-drop / file picker zone */}
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  className="hidden"
+                  accept="image/png,image/jpeg,image/webp"
+                  onChange={(e) => {
+                    if (e.target.files && e.target.files[0]) {
+                      handleImageFileUpload(e.target.files[0]);
+                    }
+                  }}
+                />
+
+                <div
+                  onClick={() => !isVisualAuditing && fileInputRef.current?.click()}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setIsDragging(true);
+                  }}
+                  onDragLeave={() => setIsDragging(false)}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setIsDragging(false);
+                    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+                      handleImageFileUpload(e.dataTransfer.files[0]);
+                    }
+                  }}
+                  className={`border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-all ${
+                    isDragging
+                      ? "border-blue-500 bg-blue-50/60 ring-2 ring-blue-500/20"
+                      : "border-slate-300 hover:border-blue-400 hover:bg-slate-50/60"
+                  } ${isVisualAuditing ? "opacity-60 cursor-not-allowed" : ""}`}
+                >
+                  <div className="flex flex-col items-center justify-center space-y-2">
+                    <div className="w-12 h-12 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center">
+                      <Upload className="w-6 h-6" />
+                    </div>
+                    <div>
+                      <p className="text-sm font-bold text-slate-800">
+                        Drop your banner image here, or <span className="text-blue-600 underline">browse</span>
+                      </p>
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        Supports PNG, JPG, or WebP up to 4 MB (real content-type validated)
+                      </p>
+                    </div>
+                    <span className="text-[11px] text-slate-400 font-mono">
+                      The image is sent to Google Gemini for analysis.
+                    </span>
+                  </div>
+                </div>
+
+                {/* Loading State while processing */}
+                {isVisualAuditing && (
+                  <div className="p-4 bg-blue-50 border border-blue-200 rounded-xl text-blue-900 flex items-center gap-3">
+                    <RefreshCw className="w-5 h-5 animate-spin text-blue-600 shrink-0" />
+                    <div>
+                      <p className="text-xs font-bold text-blue-900">Reading the image...</p>
+                      <p className="text-[11px] text-blue-700 mt-0.5">
+                        Downscaling to max 1600px &bull; Calling Gemini Vision for OCR &bull; WCAG AA typography contrast check &bull; CIE Lab palette analysis &bull; Verbatim text validator
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {visualAuditError && (
+                  <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 shrink-0" />
+                    <span>{visualAuditError}</span>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Split Screen Review Interface */}
             {activeDraft ? (
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-                {/* Left Column: Side-by-Side Original (with Highlights) vs Proposed Final Copy */}
+                {/* Left Column: Visual Banner Review OR Text Copy Review */}
                 <div className="lg:col-span-7 bg-white rounded-2xl border border-slate-200 shadow-2xs p-5 sm:p-6 flex flex-col justify-between space-y-4">
                   <div>
                     <div className="flex items-center justify-between pb-3 border-b border-slate-100">
@@ -1077,6 +1851,11 @@ export default function App() {
                           <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-600 font-mono">
                             v{activeDraft.version}
                           </span>
+                          {activeDraft.isVisual && (
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-800 font-mono">
+                              Visual Banner
+                            </span>
+                          )}
                         </div>
                         <p className="text-xs text-slate-400">
                           Status: <span className="font-semibold capitalize text-slate-700">{activeDraft.status.replace("_", " ")}</span>
@@ -1096,26 +1875,88 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* Side-by-Side Comparison Container */}
-                    <div className="mt-4 space-y-4">
-                      {/* Original with interactive colored highlights */}
-                      <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200">
-                        <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1.5">
-                          Original Draft (Click highlight to view finding)
-                        </span>
-                        {renderHighlightedText(activeDraft.originalText, activeDraft.findings)}
-                      </div>
+                    {/* Content Section: Visual vs Text */}
+                    {activeDraft.isVisual ? (
+                      <div className="mt-4 space-y-4">
+                        {/* Image Preview with overlay bounding boxes */}
+                        {renderBannerImageWithBoxes(activeDraft, visualImagePreview)}
 
-                      {/* Live Proposed Final Copy */}
-                      <div className="p-3.5 bg-emerald-50/50 rounded-xl border border-emerald-200">
-                        <span className="text-[10px] font-bold text-emerald-800 uppercase tracking-wider block mb-1.5">
-                          Proposed Final Copy (Reflecting Accepted & Edited Fixes)
-                        </span>
-                        <p className="text-sm font-medium text-emerald-950 whitespace-pre-wrap leading-relaxed">
-                          {activeDraft.currentText}
-                        </p>
+                        {/* Extracted Text with Highlighted Quotes */}
+                        <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200">
+                          <div className="flex items-center justify-between mb-1.5">
+                            <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                              Extracted Banner Text (Click highlight to view finding)
+                            </span>
+                            {activeDraft.hasLogo !== undefined && (
+                              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-200 text-slate-700 font-mono">
+                                {activeDraft.hasLogo ? "✓ Brand Logo Detected" : "No Logo Detected"}
+                              </span>
+                            )}
+                          </div>
+                          {renderHighlightedText(activeDraft.originalText || activeDraft.extractedText, activeDraft.findings)}
+                        </div>
+
+                        {/* Editable Alt-Text Box (Rule V-03) */}
+                        <div className="p-3.5 bg-blue-50/40 rounded-xl border border-blue-200/80">
+                          <div className="flex items-center justify-between mb-1.5">
+                            <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                              <Eye className="w-3.5 h-3.5 text-blue-600" />
+                              Image Alt Text (Rule V-03)
+                            </span>
+                            <span
+                              className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                                (activeDraft.altText || editableAltText)
+                                  ? "bg-emerald-100 text-emerald-800"
+                                  : "bg-red-100 text-red-800"
+                              }`}
+                            >
+                              {(activeDraft.altText || editableAltText) ? "Alt Text Present" : "Missing Alt Text (V-03)"}
+                            </span>
+                          </div>
+                          <div className="space-y-2">
+                            <textarea
+                              rows={2}
+                              maxLength={125}
+                              value={editableAltText}
+                              onChange={(e) => setEditableAltText(e.target.value)}
+                              placeholder="Describe image concisely for screen readers (max 125 chars)..."
+                              className="w-full p-2.5 text-xs bg-white rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500 font-sans"
+                            />
+                            <div className="flex items-center justify-between text-[11px] text-slate-500">
+                              <span>{editableAltText.length} / 125 characters</span>
+                              <button
+                                type="button"
+                                onClick={handleSaveAltText}
+                                className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1 shadow-2xs"
+                              >
+                                <Save className="w-3 h-3" /> Save Alt Text
+                              </button>
+                            </div>
+                          </div>
+                        </div>
                       </div>
-                    </div>
+                    ) : (
+                      /* Standard Text Side-by-Side Comparison */
+                      <div className="mt-4 space-y-4">
+                        {/* Original with interactive colored highlights */}
+                        <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200">
+                          <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1.5">
+                            Original Draft (Click highlight to view finding)
+                          </span>
+                          {renderHighlightedText(activeDraft.originalText, activeDraft.findings)}
+                        </div>
+
+                        {/* Live Proposed Final Copy */}
+                        <div className="p-3.5 bg-emerald-50/50 rounded-xl border border-emerald-200">
+                          <span className="text-[10px] font-bold text-emerald-800 uppercase tracking-wider block mb-1.5">
+                            Proposed Final Copy (Reflecting Accepted &amp; Edited Fixes)
+                          </span>
+                          <p className="text-sm font-medium text-emerald-950 whitespace-pre-wrap leading-relaxed">
+                            {activeDraft.currentText}
+                          </p>
+                        </div>
+                      </div>
+                    )}
 
                     {/* Validator Stats (Real Counts) */}
                     <div className="mt-4 p-3 bg-slate-100/70 rounded-xl border border-slate-200 flex items-center justify-between text-xs text-slate-700">
@@ -1168,12 +2009,20 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Right Column: Finding Cards with Accept, Edit, Reject, and Undo */}
+                {/* Right Column: Visual Cards (if visual) + Finding Cards (Accept, Edit, Reject, Undo) */}
                 <div className="lg:col-span-5 space-y-4">
+                  {/* If active draft is a visual banner, show Colour/Contrast Card and Designer Copy List */}
+                  {activeDraft.isVisual && (
+                    <>
+                      {renderColourAndContrastCard(activeDraft)}
+                      {renderDesignerCopyList(activeDraft)}
+                    </>
+                  )}
+
                   <div className="flex items-center justify-between">
                     <h3 className="font-bold text-slate-900 text-sm flex items-center gap-1.5">
                       <Sparkles className="w-4 h-4 text-blue-600" />
-                      Findings & Fixes ({activeDraft.findings?.length || 0})
+                      Findings &amp; Fixes ({activeDraft.findings?.length || 0})
                     </h3>
                     <span className="text-xs text-slate-500">Click card to highlight</span>
                   </div>
@@ -1183,7 +2032,7 @@ export default function App() {
                       <CheckCircle2 className="w-10 h-10 text-emerald-500 mx-auto mb-2" />
                       <h4 className="font-bold text-slate-800 text-sm">No Compliance Issues Detected</h4>
                       <p className="text-xs text-slate-500 mt-1">
-                        Draft complies with all active brand guidelines and verified facts.
+                        Draft complies with all active brand guidelines, visual rules, and verified facts.
                       </p>
                     </div>
                   )}
@@ -1275,7 +2124,7 @@ export default function App() {
                                   onClick={() => handleFindingAction(finding.id, "edit", customFixText)}
                                   className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-[11px] font-bold focus:outline-none focus:ring-2 focus:ring-blue-500"
                                 >
-                                  Save & Apply
+                                  Save &amp; Apply
                                 </button>
                                 <button
                                   onClick={() => setEditingFixId(null)}
@@ -1345,18 +2194,26 @@ export default function App() {
               </div>
             ) : (
               /* Empty state if visitor hasn't run any draft yet */
-              <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center space-y-3">
+              <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center space-y-4">
                 <FileText className="w-10 h-10 text-slate-300 mx-auto" />
                 <h3 className="text-base font-bold text-slate-800">No Drafts in Workspace</h3>
                 <p className="text-xs text-slate-500 max-w-md mx-auto">
-                  Paste your marketing draft above, or click below to load the CampusPro sample scenario and run the governance check.
+                  Submit a written marketing draft or upload a banner image above to run the explainable BrandGuard check.
                 </p>
-                <button
-                  onClick={handleLoadDemoScenario}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 shadow-xs"
-                >
-                  <Sparkles className="w-3.5 h-3.5" /> Load CampusPro Demo Draft
-                </button>
+                <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
+                  <button
+                    onClick={handleLoadDemoScenario}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 shadow-xs"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" /> Load CampusPro Demo Draft
+                  </button>
+                  <button
+                    onClick={() => handleLoadSampleBanner("clean-banner.png", "Sample Clean Banner")}
+                    className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold inline-flex items-center gap-1.5"
+                  >
+                    <ImageIcon className="w-3.5 h-3.5" /> Try Sample Clean Banner
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -1458,26 +2315,65 @@ export default function App() {
                       </span>
                     </div>
 
-                    {/* Before / After Comparison */}
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
-                        <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1">
-                          Original Submitted Copy
-                        </span>
-                        <p className="text-xs text-slate-600 line-through decoration-red-400 leading-relaxed whitespace-pre-wrap">
-                          {activeDraft.originalText}
-                        </p>
-                      </div>
+                    {/* Visual Banner Review vs Standard Copy Comparison */}
+                    {activeDraft.isVisual ? (
+                      <div className="space-y-4">
+                        {/* Audited Banner Image */}
+                        {renderBannerImageWithBoxes(activeDraft)}
 
-                      <div className="p-3 bg-emerald-50/50 border border-emerald-200 rounded-xl">
-                        <span className="text-[10px] font-bold text-emerald-800 uppercase tracking-wider block mb-1">
-                          Current Finalized Copy
-                        </span>
-                        <p className="text-xs font-medium text-emerald-950 leading-relaxed whitespace-pre-wrap">
-                          {activeDraft.currentText}
-                        </p>
+                        {/* Extracted Text & Alt Text */}
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
+                            <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1">
+                              Extracted Banner Text (OCR)
+                            </span>
+                            <p className="text-xs font-mono text-slate-800 leading-relaxed whitespace-pre-wrap">
+                              {activeDraft.originalText || activeDraft.extractedText}
+                            </p>
+                          </div>
+
+                          <div className="p-3 bg-blue-50/50 border border-blue-200 rounded-xl">
+                            <span className="text-[10px] font-bold text-blue-900 uppercase tracking-wider block mb-1 flex items-center gap-1">
+                              <Eye className="w-3 h-3 text-blue-600" /> Accessibility Alt Text (V-03)
+                            </span>
+                            <p className="text-xs font-medium text-slate-800 leading-relaxed">
+                              {activeDraft.altText ? (
+                                `"${activeDraft.altText}"`
+                              ) : (
+                                <span className="text-red-600 italic">No alt text provided (Rule V-03 violation)</span>
+                              )}
+                            </p>
+                          </div>
+                        </div>
+
+                        {/* Colour & Contrast Governance Card */}
+                        {renderColourAndContrastCard(activeDraft)}
+
+                        {/* Replacement Copy for Designer List */}
+                        {renderDesignerCopyList(activeDraft)}
                       </div>
-                    </div>
+                    ) : (
+                      /* Before / After Text Copy Comparison */
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
+                          <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1">
+                            Original Submitted Copy
+                          </span>
+                          <p className="text-xs text-slate-600 line-through decoration-red-400 leading-relaxed whitespace-pre-wrap">
+                            {activeDraft.originalText}
+                          </p>
+                        </div>
+
+                        <div className="p-3 bg-emerald-50/50 border border-emerald-200 rounded-xl">
+                          <span className="text-[10px] font-bold text-emerald-800 uppercase tracking-wider block mb-1">
+                            Current Finalized Copy
+                          </span>
+                          <p className="text-xs font-medium text-emerald-950 leading-relaxed whitespace-pre-wrap">
+                            {activeDraft.currentText}
+                          </p>
+                        </div>
+                      </div>
+                    )}
 
                     {/* Resolved Findings Recap */}
                     <div>
@@ -1584,7 +2480,9 @@ export default function App() {
                   Drafts Analysed
                 </span>
                 <span className="text-3xl font-extrabold text-slate-900">{insights?.draftsAnalysed ?? 0}</span>
-                <span className="text-[11px] text-slate-500 font-medium block mt-1">Total in workspace</span>
+                <span className="text-[11px] text-slate-500 font-medium block mt-1">
+                  {insights ? `${insights.textDraftsCount || 0} text drafts • ${insights.visualDraftsCount || 0} banners` : "0 text • 0 banners"}
+                </span>
               </div>
               <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-2xs">
                 <span className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-1">
@@ -1592,7 +2490,7 @@ export default function App() {
                 </span>
                 <span className="text-3xl font-extrabold text-blue-600">{insights?.findingsFlagged ?? 0}</span>
                 <span className="text-[11px] text-slate-500 font-medium block mt-1">
-                  {insights ? `${insights.findingsAccepted} accepted, ${insights.findingsEdited} edited, ${insights.findingsRejected} rejected` : "0 decisions"}
+                  {insights ? `${insights.textFindingsCount || 0} text • ${insights.visualFindingsCount || 0} visual rules` : "0 decisions"}
                 </span>
               </div>
               <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-2xs">
