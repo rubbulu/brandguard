@@ -98,6 +98,9 @@ export default function App() {
   const [isDragging, setIsDragging] = useState(false);
   const [copiedItem, setCopiedItem] = useState(null);
   const fileInputRef = useRef(null);
+  const [analyzingFilename, setAnalyzingFilename] = useState(null);
+  const currentVisualReqIdRef = useRef(0);
+  const currentVisualAbortControllerRef = useRef(null);
 
   const handleCopyText = (text, id) => {
     if (navigator?.clipboard?.writeText) {
@@ -270,22 +273,39 @@ export default function App() {
     handleSaveVisualSettings(updated);
   };
 
-  // Run Visual Audit on uploaded image or sample banner
-  const handleRunVisualAudit = async (base64Image, title = "Visual Banner Audit", channel = "Social / Display Banner") => {
+  // Run Visual Audit on uploaded image or sample banner (STALE STATE FIX: immediately clear previous results)
+  const handleRunVisualAudit = async (base64Image, title = "Visual Banner Audit", channel = "Social / Display Banner", filename = null) => {
+    // 1. Abort previous in-flight request
+    currentVisualAbortControllerRef.current?.abort();
+    const controller = new AbortController();
+    currentVisualAbortControllerRef.current = controller;
+    const reqId = ++currentVisualReqIdRef.current;
+
+    const displayFilename = filename || title || "banner";
+
+    // 2. Immediately clear previous visual state
+    setActiveDraft(null);
+    setEditableAltText("");
+    setSelectedFindingId(null);
+    setHoveredRegionIdx(null);
+    setVisualImagePreview(base64Image);
+    setAnalyzingFilename(displayFilename);
     setIsVisualAuditing(true);
     setVisualAuditError(null);
-    setVisualImagePreview(base64Image);
 
     try {
       const res = await wsFetch("/api/visual-review", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
         body: JSON.stringify({
           image: base64Image,
           draftTitle: title,
           channel: channel
         })
       });
+
+      if (reqId !== currentVisualReqIdRef.current) return;
 
       if (res.status === 429) {
         const err = await res.json();
@@ -298,47 +318,73 @@ export default function App() {
       }
 
       const data = await res.json();
+      if (reqId !== currentVisualReqIdRef.current) return;
+
       setActiveDraft(data.draft);
       setEditableAltText(data.alt_text || "");
+      setAnalyzingFilename(null);
       await loadWorkspaceData();
       showNotice(`Visual audit completed: ${data.findings.length} findings flagged.`);
     } catch (err) {
+      if (err.name === "AbortError" || reqId !== currentVisualReqIdRef.current) {
+        return;
+      }
       setVisualAuditError(err.message);
+      setAnalyzingFilename(null);
     } finally {
-      setIsVisualAuditing(false);
+      if (reqId === currentVisualReqIdRef.current) {
+        setIsVisualAuditing(false);
+      }
     }
   };
 
-  // Load Sample Banner Preset
+  // Load Sample Banner Preset (STALE STATE FIX: clear immediately)
   const handleLoadSampleBanner = async (sampleFileName, label) => {
+    currentVisualAbortControllerRef.current?.abort();
     setCreatorMode("visual");
+    setActiveDraft(null);
+    setEditableAltText("");
+    setSelectedFindingId(null);
+    setVisualImagePreview(null);
+    setAnalyzingFilename(sampleFileName);
     setIsVisualAuditing(true);
     setVisualAuditError(null);
+
     try {
       const response = await fetch(`/samples/${sampleFileName}`);
       if (!response.ok) throw new Error(`Could not load sample banner ${sampleFileName}`);
       const blob = await response.blob();
       const reader = new FileReader();
       reader.onloadend = () => {
-        handleRunVisualAudit(reader.result, label, "Social / Banner");
+        handleRunVisualAudit(reader.result, label, "Social / Banner", sampleFileName);
       };
       reader.readAsDataURL(blob);
     } catch (e) {
       setIsVisualAuditing(false);
+      setAnalyzingFilename(null);
       setVisualAuditError(e.message);
     }
   };
 
-  // Handle Drag & Drop / File Upload
+  // Handle Drag & Drop / File Upload (STALE STATE FIX: clear immediately)
   const handleImageFileUpload = (file) => {
     if (!file) return;
     if (file.size > 4 * 1024 * 1024) {
       setVisualAuditError("Image exceeds 4 MB maximum size limit.");
       return;
     }
+    currentVisualAbortControllerRef.current?.abort();
+    setActiveDraft(null);
+    setEditableAltText("");
+    setSelectedFindingId(null);
+    setVisualImagePreview(null);
+    setAnalyzingFilename(file.name);
+    setIsVisualAuditing(true);
+    setVisualAuditError(null);
+
     const reader = new FileReader();
     reader.onloadend = () => {
-      handleRunVisualAudit(reader.result, file.name.replace(/\.[^/.]+$/, ""), "Social / Display Banner");
+      handleRunVisualAudit(reader.result, file.name.replace(/\.[^/.]+$/, ""), "Social / Display Banner", file.name);
     };
     reader.readAsDataURL(file);
   };
@@ -775,8 +821,7 @@ export default function App() {
 
   // Helper: Render Audited Banner Image with Interactive Bounding Boxes
   const renderBannerImageWithBoxes = (draft, preview) => {
-    if (!draft) return null;
-    const imgSrc = preview || draft.imagePath;
+    const imgSrc = preview || draft?.imagePath;
 
     return (
       <div className="relative w-full overflow-hidden rounded-xl bg-slate-950 flex items-center justify-center p-2 border border-slate-200">
@@ -784,7 +829,7 @@ export default function App() {
           {imgSrc ? (
             <img
               src={imgSrc}
-              alt={draft.altText || "Audited banner"}
+              alt={draft?.altText || "Audited banner"}
               className="max-h-[440px] w-auto max-w-full object-contain rounded-lg block"
             />
           ) : (
@@ -793,8 +838,8 @@ export default function App() {
             </div>
           )}
 
-          {/* Bounding box overlays */}
-          {draft.regions?.map((reg, idx) => {
+          {/* Bounding box overlays (hidden while isVisualAuditing) */}
+          {!isVisualAuditing && draft?.regions?.map((reg, idx) => {
             const isHovered = hoveredRegionIdx === idx;
             const measuredRatio = reg.contrastRatio || (reg.fgColor && reg.bgColor ? calcContrast(reg.fgColor, reg.bgColor) : null);
             const isFindingSelected =
@@ -867,9 +912,9 @@ export default function App() {
           <div className="flex items-center justify-between mb-1.5">
             <span className="text-xs font-bold text-slate-700">Brand Palette Match (Rule V-02):</span>
             {paletteCheck?.measured ? (
-              paletteCheck.flagged ? (
-                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 flex items-center gap-1">
-                  <AlertTriangle className="w-3 h-3" /> Flagged ({paletteCheck.off_palette_percentage}% off-palette)
+              paletteCheck.flagged || paletteCheck.status === "non_compliant" || paletteCheck.status === "flagged" ? (
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-800 flex items-center gap-1">
+                  <AlertTriangle className="w-3 h-3 text-red-600" /> ✕ Non-compliant ({paletteCheck.on_palette_percentage}% on-palette)
                 </span>
               ) : (
                 <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
@@ -1003,7 +1048,7 @@ export default function App() {
   const renderReplacementCopyList = (draft) => {
     if (!draft || !draft.findings) return null;
     const copyFindings = draft.findings.filter(
-      (f) => f.suggested_fix && !["V-01", "V-02"].includes(f.rule_id) && f.source !== "contrast" && f.source !== "palette"
+      (f) => f.suggested_fix && f.rule_id !== "SEC-01" && f.source !== "security" && !["V-01", "V-02"].includes(f.rule_id) && f.source !== "contrast" && f.source !== "palette"
     );
     if (copyFindings.length === 0) return null;
 
@@ -1681,7 +1726,14 @@ export default function App() {
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => setCreatorMode("text")}
+                  onClick={() => {
+                    setCreatorMode("text");
+                    setActiveDraft(null);
+                    setVisualImagePreview(null);
+                    setAnalyzingFilename(null);
+                    setSelectedFindingId(null);
+                    setVisualAuditError(null);
+                  }}
                   className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${
                     creatorMode === "text"
                       ? "bg-blue-600 text-white shadow-xs"
@@ -1693,7 +1745,14 @@ export default function App() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setCreatorMode("visual")}
+                  onClick={() => {
+                    setCreatorMode("visual");
+                    setActiveDraft(null);
+                    setVisualImagePreview(null);
+                    setAnalyzingFilename(null);
+                    setSelectedFindingId(null);
+                    setVisualAuditError(null);
+                  }}
                   className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${
                     creatorMode === "visual"
                       ? "bg-blue-600 text-white shadow-xs"
@@ -1925,9 +1984,9 @@ export default function App() {
                   <div className="p-4 bg-blue-50 border border-blue-200 rounded-xl text-blue-900 flex items-center gap-3">
                     <RefreshCw className="w-5 h-5 animate-spin text-blue-600 shrink-0" />
                     <div>
-                      <p className="text-xs font-bold text-blue-900">Reading the image...</p>
+                      <p className="text-xs font-bold text-blue-900">Analysing {analyzingFilename || "banner"}...</p>
                       <p className="text-[11px] text-blue-700 mt-0.5">
-                        Downscaling to max 1600px &bull; Calling Gemini Vision for OCR &bull; WCAG AA typography contrast check &bull; CIE Lab palette analysis &bull; Verbatim text validator
+                        Downscaling to max 1600px &bull; Calling Gemini Vision for OCR &bull; WCAG AA typography contrast check &bull; Verbatim text validator
                       </p>
                     </div>
                   </div>
@@ -1943,8 +2002,70 @@ export default function App() {
             )}
 
             {/* Split Screen Review Interface */}
-            {activeDraft ? (
+            {isVisualAuditing ? (
+              /* Analysing <filename>... Skeleton State */
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 animate-pulse">
+                {/* Left Column: Image Preview with NO overlays + OCR & Alt-Text skeleton */}
+                <div className="lg:col-span-7 bg-white rounded-2xl border border-slate-200 shadow-2xs p-5 sm:p-6 space-y-4">
+                  <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                    <div className="flex items-center gap-2">
+                      <RefreshCw className="w-4 h-4 text-blue-600 animate-spin" />
+                      <h3 className="font-bold text-slate-800 text-sm">
+                        Analysing {analyzingFilename || "banner"}...
+                      </h3>
+                    </div>
+                    <span className="text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-blue-100 text-blue-700 font-mono">
+                      Analysing...
+                    </span>
+                  </div>
+
+                  {/* New Image preview with NO overlays */}
+                  {renderBannerImageWithBoxes(null, visualImagePreview)}
+
+                  {/* Skeleton placeholders */}
+                  <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 space-y-2">
+                    <div className="h-3 bg-slate-200 rounded w-1/3"></div>
+                    <div className="h-4 bg-slate-200 rounded w-3/4"></div>
+                    <div className="h-4 bg-slate-200 rounded w-1/2"></div>
+                  </div>
+
+                  <div className="p-3.5 bg-blue-50/40 rounded-xl border border-blue-200/80 space-y-2">
+                    <div className="h-3 bg-blue-200 rounded w-1/4"></div>
+                    <div className="h-8 bg-blue-100 rounded w-full"></div>
+                  </div>
+                </div>
+
+                {/* Right Column: Skeleton for Findings, Contrast, and Palette */}
+                <div className="lg:col-span-5 space-y-4">
+                  <div className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
+                    <div className="h-4 bg-slate-200 rounded w-1/2"></div>
+                    <div className="h-3 bg-slate-100 rounded w-full"></div>
+                    <div className="h-16 bg-slate-100 rounded w-full"></div>
+                  </div>
+                  <div className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
+                    <div className="h-4 bg-slate-200 rounded w-2/3"></div>
+                    <div className="h-24 bg-slate-100 rounded w-full"></div>
+                  </div>
+                </div>
+              </div>
+            ) : activeDraft ? (
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                {/* Security Alert Strip for Prompt Injections */}
+                {activeDraft.findings?.some(f => f.rule_id === "SEC-01" || f.source === "security") && (
+                  <div className="lg:col-span-12 p-3.5 bg-red-600 text-white rounded-xl flex items-center justify-between shadow-xs">
+                    <div className="flex items-center gap-2.5">
+                      <AlertTriangle className="w-5 h-5 shrink-0 text-white" />
+                      <div>
+                        <span className="font-bold text-xs uppercase tracking-wider block">Security Alert: Prompt Injection Detected</span>
+                        <span className="text-xs text-red-100">Adversarial instructions attempting to instruct the reviewer were detected and must be removed.</span>
+                      </div>
+                    </div>
+                    <span className="text-[10px] font-bold px-2.5 py-1 bg-red-800 text-white rounded-full uppercase tracking-wider">
+                      Action Required
+                    </span>
+                  </div>
+                )}
+
                 {/* Left Column: Visual Banner Review OR Text Copy Review */}
                 <div className="lg:col-span-7 bg-white rounded-2xl border border-slate-200 shadow-2xs p-5 sm:p-6 flex flex-col justify-between space-y-4">
                   <div>
@@ -2031,7 +2152,8 @@ export default function App() {
                               <button
                                 type="button"
                                 onClick={handleSaveAltText}
-                                className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1 shadow-2xs"
+                                disabled={isVisualAuditing}
+                                className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1 shadow-2xs disabled:opacity-50"
                               >
                                 <Save className="w-3 h-3" /> Save Alt Text
                               </button>
@@ -2068,7 +2190,8 @@ export default function App() {
                         <Shield className="w-4 h-4 text-blue-600" />
                         <span>
                           <strong>Validator:</strong> {activeDraft.findings?.length || 0} valid findings kept,{" "}
-                          {activeDraft.validatorRejected?.length || 0} dropped
+                          {activeDraft.validatorRejected?.length || 0} dropped,{" "}
+                          {activeDraft.stats?.merged || activeDraft.stats?.merged_count || 0} merged
                         </span>
                       </div>
                       <span className="text-[11px] text-slate-500 font-mono">
@@ -2106,7 +2229,8 @@ export default function App() {
                     </span>
                     <button
                       onClick={handleSubmitToReviewer}
-                      className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                      disabled={isVisualAuditing || isReviewing}
+                      className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-50"
                     >
                       <Send className="w-3.5 h-3.5" /> Submit to Reviewer
                     </button>
@@ -2215,7 +2339,21 @@ export default function App() {
                           </p>
 
                           {/* Suggested Fix View or Inline Edit Box */}
-                          {editingFixId === finding.id ? (
+                          {finding.rule_id === "SEC-01" ? (
+                            <div className="p-2.5 bg-red-50 border border-red-200/80 rounded-lg mb-3 flex items-center justify-between">
+                              <div>
+                                <span className="text-[10px] font-bold uppercase tracking-wider text-red-700 block mb-0.5">
+                                  Action
+                                </span>
+                                <p className="text-xs font-semibold text-red-950">
+                                  Remove instruction text from banner / copy
+                                </p>
+                              </div>
+                              <span className="text-[10px] font-bold px-2 py-0.5 bg-red-200 text-red-800 rounded uppercase font-mono">
+                                Remove
+                              </span>
+                            </div>
+                          ) : editingFixId === finding.id ? (
                             <div className="mb-3 space-y-2">
                               <label className="text-[11px] font-bold text-slate-700">Customize Replacement Text:</label>
                               <input
@@ -2256,22 +2394,27 @@ export default function App() {
                               <>
                                 <button
                                   onClick={() => handleFindingAction(finding.id, "accept")}
-                                  className="flex-1 py-1.5 px-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold flex items-center justify-center gap-1 transition-all focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                  disabled={isVisualAuditing || isReviewing}
+                                  className="flex-1 py-1.5 px-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold flex items-center justify-center gap-1 transition-all focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-50"
                                 >
-                                  <Check className="w-3.5 h-3.5" /> Accept
+                                  <Check className="w-3.5 h-3.5" /> {finding.rule_id === "SEC-01" ? "Accept Removal" : "Accept"}
                                 </button>
-                                <button
-                                  onClick={() => {
-                                    setEditingFixId(finding.id);
-                                    setCustomFixText(finding.suggested_fix);
-                                  }}
-                                  className="py-1.5 px-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold flex items-center justify-center gap-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                >
-                                  <Edit3 className="w-3.5 h-3.5" /> Edit
-                                </button>
+                                {finding.rule_id !== "SEC-01" && (
+                                  <button
+                                    onClick={() => {
+                                      setEditingFixId(finding.id);
+                                      setCustomFixText(finding.suggested_fix);
+                                    }}
+                                    disabled={isVisualAuditing || isReviewing}
+                                    className="py-1.5 px-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold flex items-center justify-center gap-1 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                                  >
+                                    <Edit3 className="w-3.5 h-3.5" /> Edit
+                                  </button>
+                                )}
                                 <button
                                   onClick={() => handleFindingAction(finding.id, "reject")}
-                                  className="py-1.5 px-2.5 bg-slate-100 hover:bg-red-50 hover:text-red-600 text-slate-500 rounded-lg text-xs font-bold focus:outline-none focus:ring-2 focus:ring-red-500"
+                                  disabled={isVisualAuditing || isReviewing}
+                                  className="py-1.5 px-2.5 bg-slate-100 hover:bg-red-50 hover:text-red-600 text-slate-500 rounded-lg text-xs font-bold focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50"
                                   title="Reject finding"
                                 >
                                   <X className="w-3.5 h-3.5" /> Reject
@@ -2399,6 +2542,22 @@ export default function App() {
                 {/* Reviewer Action Panel */}
                 {activeDraft && (
                   <div className="lg:col-span-8 bg-white rounded-2xl border border-slate-200 shadow-2xs p-5 sm:p-6 space-y-5">
+                    {/* Security Alert Strip for Reviewer */}
+                    {activeDraft.findings?.some(f => f.rule_id === "SEC-01" || f.source === "security") && (
+                      <div className="p-3.5 bg-red-600 text-white rounded-xl flex items-center justify-between shadow-xs">
+                        <div className="flex items-center gap-2.5">
+                          <AlertTriangle className="w-5 h-5 shrink-0 text-white" />
+                          <div>
+                            <span className="font-bold text-xs uppercase tracking-wider block">Security Alert: Prompt Injection Detected</span>
+                            <span className="text-xs text-red-100">Adversarial instructions attempting to instruct the reviewer were detected and must be removed.</span>
+                          </div>
+                        </div>
+                        <span className="text-[10px] font-bold px-2.5 py-1 bg-red-800 text-white rounded-full uppercase tracking-wider">
+                          Action Required
+                        </span>
+                      </div>
+                    )}
+
                     <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                       <div>
                         <h2 className="text-lg font-bold text-slate-900">{activeDraft.title}</h2>

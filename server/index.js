@@ -438,7 +438,8 @@ app.post(["/api/visual-review", "/visual-review"], async (req, res) => {
       hasLogo: auditResult.has_logo,
       version: 1,
       findings: auditResult.findings,
-      validatorRejected: [],
+      validatorRejected: auditResult.stats?.dropped_by_validator ? new Array(auditResult.stats.dropped_by_validator).fill({ reason: "Dropped by validator" }) : [],
+      stats: auditResult.stats,
       contrastResults: auditResult.contrast_results,
       paletteSummary: auditResult.palette_summary,
       regions: auditResult.regions,
@@ -512,9 +513,15 @@ app.patch("/api/drafts/:id/alt-text", (req, res) => {
 function recomputeDraftText(originalText, findings) {
   let text = originalText;
   for (const f of findings) {
-    if ((f.status === "accepted" || f.status === "edited") && f.suggested_fix) {
-      if (text.includes(f.quote)) {
-        text = text.replace(f.quote, f.suggested_fix);
+    if (f.status === "accepted" || f.status === "edited") {
+      if (f.rule_id === "SEC-01" || f.action === "remove") {
+        if (text && text.includes(f.quote)) {
+          text = text.replace(f.quote, "").trim();
+        }
+      } else if (f.suggested_fix) {
+        if (text && text.includes(f.quote)) {
+          text = text.replace(f.quote, f.suggested_fix);
+        }
       }
     }
   }

@@ -2,7 +2,7 @@ import sharp from "sharp";
 import path from "path";
 import fs from "fs";
 import { callGeminiReview, ACTIVE_MODEL, CANDIDATE_MODELS } from "./geminiService.js";
-import { validateFindings } from "./validator.js";
+import { validateFindings, mergeFindings } from "./validator.js";
 import { getWorkspaceImagesDir } from "./workspaceStore.js";
 import { detectPromptInjection } from "./securityScanner.js";
 
@@ -77,6 +77,72 @@ function getContrastRatio(rgb1, rgb2) {
   const lighter = Math.max(l1, l2);
   const darker = Math.min(l1, l2);
   return (lighter + 0.05) / (darker + 0.05);
+}
+
+// Majority / Minority colour clustering: background = majority cluster, text = minority cluster
+function estimateTextAndBgClusters(sampledPixels) {
+  if (!sampledPixels || sampledPixels.length < 2) return null;
+  sampledPixels.sort((a, b) => a.lum - b.lum);
+  let c1 = { ...sampledPixels[Math.floor(sampledPixels.length * 0.1)] };
+  let c2 = { ...sampledPixels[Math.floor(sampledPixels.length * 0.9)] };
+
+  let cluster1 = [];
+  let cluster2 = [];
+
+  for (let iter = 0; iter < 5; iter++) {
+    cluster1 = [];
+    cluster2 = [];
+    for (const p of sampledPixels) {
+      const d1 = Math.abs(p.lum - c1.lum);
+      const d2 = Math.abs(p.lum - c2.lum);
+      if (d1 <= d2) {
+        cluster1.push(p);
+      } else {
+        cluster2.push(p);
+      }
+    }
+    if (cluster1.length > 0) {
+      c1.r = cluster1.reduce((sum, p) => sum + p.r, 0) / cluster1.length;
+      c1.g = cluster1.reduce((sum, p) => sum + p.g, 0) / cluster1.length;
+      c1.b = cluster1.reduce((sum, p) => sum + p.b, 0) / cluster1.length;
+      c1.lum = getRelativeLuminance(c1.r, c1.g, c1.b);
+    }
+    if (cluster2.length > 0) {
+      c2.r = cluster2.reduce((sum, p) => sum + p.r, 0) / cluster2.length;
+      c2.g = cluster2.reduce((sum, p) => sum + p.g, 0) / cluster2.length;
+      c2.b = cluster2.reduce((sum, p) => sum + p.b, 0) / cluster2.length;
+      c2.lum = getRelativeLuminance(c2.r, c2.g, c2.b);
+    }
+  }
+
+  // Background = majority cluster, Text = minority cluster
+  let bgCluster, textCluster;
+  if (cluster1.length >= cluster2.length) {
+    bgCluster = cluster1;
+    textCluster = cluster2;
+  } else {
+    bgCluster = cluster2;
+    textCluster = cluster1;
+  }
+
+  if (textCluster.length === 0) {
+    textCluster = bgCluster;
+  }
+
+  const bgR = Math.round(bgCluster.reduce((s, p) => s + p.r, 0) / bgCluster.length);
+  const bgG = Math.round(bgCluster.reduce((s, p) => s + p.g, 0) / bgCluster.length);
+  const bgB = Math.round(bgCluster.reduce((s, p) => s + p.b, 0) / bgCluster.length);
+
+  const textR = Math.round(textCluster.reduce((s, p) => s + p.r, 0) / textCluster.length);
+  const textG = Math.round(textCluster.reduce((s, p) => s + p.g, 0) / textCluster.length);
+  const textB = Math.round(textCluster.reduce((s, p) => s + p.b, 0) / textCluster.length);
+
+  return {
+    textRgb: [textR, textG, textB],
+    bgRgb: [bgR, bgG, bgB],
+    textHex: rgbToHex(textR, textG, textB),
+    bgHex: rgbToHex(bgR, bgG, bgB)
+  };
 }
 
 // --- Gemini Vision Analysis Prompt ---
@@ -318,19 +384,25 @@ export async function runVisualAudit({
         continue;
       }
 
-      // Sort by luminance
-      sampledPixels.sort((a, b) => a.lum - b.lum);
+      // Estimate text and background by majority vs minority clustering
+      const clusters = estimateTextAndBgClusters(sampledPixels);
+      if (!clusters) {
+        region.contrastRatio = null;
+        region.calculationType = "estimated";
+        region.passesContrast = null;
+        contrastResults.push({
+          text: region.text,
+          measured: false,
+          calculationType: "estimated",
+          reason: "could not measure",
+          needs_human_judgement: true
+        });
+        continue;
+      }
 
-      // 5th percentile (text stroke or dark background) vs 95th percentile (bright baseline)
-      const p05Idx = Math.max(0, Math.floor(sampledPixels.length * 0.05));
-      const p95Idx = Math.min(sampledPixels.length - 1, Math.floor(sampledPixels.length * 0.95));
-
-      const darkPixel = sampledPixels[p05Idx];
-      const lightPixel = sampledPixels[p95Idx];
-
-      const ratio = getContrastRatio([darkPixel.r, darkPixel.g, darkPixel.b], [lightPixel.r, lightPixel.g, lightPixel.b]);
-      const fgHex = rgbToHex(lightPixel.r, lightPixel.g, lightPixel.b);
-      const bgHex = rgbToHex(darkPixel.r, darkPixel.g, darkPixel.b);
+      const fgHex = clusters.textHex;
+      const bgHex = clusters.bgHex;
+      const ratio = getContrastRatio(clusters.textRgb, clusters.bgRgb);
 
       const ratioNum = Number(ratio.toFixed(2));
       const passesContrast = ratioNum >= minContrastRatio;
@@ -386,7 +458,7 @@ export async function runVisualAudit({
     }
   }
 
-  // 8. PALETTE CHECK (V-02): Computed from actual image pixels; never defaults to compliant
+  // 8. PALETTE CHECK (V-02): Computed server-side from pixels downscaled to ~100px
   const brandPalette = (visualSettings.palette && visualSettings.palette.length > 0)
     ? visualSettings.palette
     : ["#1D4ED8", "#0F172A", "#FFFFFF", "#F59E0B"];
@@ -403,13 +475,14 @@ export async function runVisualAudit({
   try {
     const thumbBuffer = await sharp(downscaledBuffer)
       .removeAlpha()
-      .resize(64, 64, { fit: "fill" })
+      .resize(100, 100, { fit: "fill" })
       .raw()
       .toBuffer();
 
-    const totalPixels = 64 * 64; // 4096
+    const totalPixels = 100 * 100; // 10000 pixels
     if (thumbBuffer && thumbBuffer.length >= totalPixels * 3) {
       const brandLabs = brandPalette.map(hex => rgbToLab(...hexToRgb(hex)));
+      let onPaletteCount = 0;
       let offPaletteCount = 0;
       const offColorCounts = new Map();
 
@@ -427,7 +500,10 @@ export async function runVisualAudit({
           if (d < minDistance) minDistance = d;
         }
 
-        if (minDistance > 30) {
+        // delta-E threshold 22 for brand palette match
+        if (minDistance <= 22) {
+          onPaletteCount++;
+        } else {
           offPaletteCount++;
           // Quantize off-palette color (step of 32)
           const qR = Math.round(r / 32) * 32;
@@ -438,30 +514,33 @@ export async function runVisualAudit({
         }
       }
 
-      const offPalettePct = Math.round((offPaletteCount / totalPixels) * 100);
+      const onPalettePct = Math.round((onPaletteCount / totalPixels) * 100);
+      const offPalettePct = 100 - onPalettePct;
       const topOffColors = [...offColorCounts.entries()]
         .sort((a, b) => b[1] - a[1])
         .slice(0, 3)
         .map(([hex]) => hex);
 
+      const isNonCompliant = onPalettePct < 75; // Brand requires >= 75% on-palette
+
       paletteSummary = {
         brand_palette: brandPalette,
         measured: true,
-        flagged: offPalettePct > 35,
+        flagged: isNonCompliant,
         off_palette_percentage: offPalettePct,
-        on_palette_percentage: Math.max(0, 100 - offPalettePct),
+        on_palette_percentage: onPalettePct,
         top_off_palette_hex: topOffColors,
-        status: offPalettePct > 35 ? "flagged" : "compliant"
+        status: isNonCompliant ? "non_compliant" : "compliant"
       };
 
-      if (offPalettePct > 35) {
+      if (isNonCompliant) {
         allFindings.push({
           id: `finding-palette-${Date.now()}`,
           rule_id: "V-02",
           quote: "(Image color palette)",
           category: "brand",
           severity: "medium",
-          explanation: `${offPalettePct}% of image pixels deviate significantly from the approved brand palette (distance > 30 in CIE Lab). Top off-palette colours: ${topOffColors.join(", ")}. [computed]`,
+          explanation: `Only ${onPalettePct}% of image pixels match the brand palette (required >= 75%). Top off-palette colours: ${topOffColors.join(", ")}. [computed]`,
           suggested_fix: `Adjust banner background and accents (${topOffColors.join(", ")}) to adhere to approved brand colours (${brandPalette.join(", ")}).`,
           needs_human_judgement: true,
           source: "palette",
@@ -511,12 +590,15 @@ export async function runVisualAudit({
     });
   }
 
-  // 11. DE-DUPLICATE FINDINGS on the same text, keeping highest severity
+  // 11. DEDUPE & MERGE: merge overlapping or nested findings of same rule_id (keep longest span)
+  const { mergedFindings, mergedCount } = mergeFindings(allFindings, extractedText);
+
+  // De-duplicate different rules on exact same text, keeping highest severity
   const severityRank = { high: 3, medium: 2, low: 1 };
   const finalFindings = [];
   const quoteMap = new Map();
 
-  for (const f of allFindings) {
+  for (const f of mergedFindings) {
     const key = (f.quote || "").trim().toLowerCase();
     // Do not de-duplicate generic structural items like "(Image color palette)"
     if (!key || key.startsWith("(") || key.startsWith("[")) {
@@ -556,7 +638,8 @@ export async function runVisualAudit({
     palette_summary: paletteSummary,
     stats: {
       kept: finalFindings.length,
-      dropped_by_validator: droppedTextCount
+      dropped_by_validator: droppedTextCount,
+      merged: mergedCount
     },
     imageUrl
   };
