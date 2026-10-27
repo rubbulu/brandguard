@@ -64,7 +64,7 @@ app.use("/visual-review", workspaceMiddleware);
 app.use("/visual-settings", workspaceMiddleware);
 
 // --- 1. Health Check & Config ---
-app.get("/api/health", (req, res) => {
+app.get(["/api/health", "/health"], (req, res) => {
   res.json({
     status: "connected",
     service: "BrandGuard Governance Engine",
@@ -385,9 +385,28 @@ app.post(["/api/review", "/review"], async (req, res) => {
 
 // --- 6b. Visual Review Endpoint (Banner / Image Review) ---
 app.post(["/api/visual-review", "/visual-review"], async (req, res) => {
+  const isStream = req.query.stream === "true" || req.headers["x-stream"] === "true";
+
+  if (isStream) {
+    res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+    res.setHeader("Transfer-Encoding", "chunked");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+  }
+
+  const sendStage = (stage, label, duration) => {
+    if (isStream && !res.writableEnded) {
+      res.write(JSON.stringify({ type: "stage", stage, label, duration }) + "\n");
+    }
+  };
+
   try {
     // 1. Enforce rate limit per workspace (same limiter as /review)
     if (!checkRateLimit(req.workspaceId)) {
+      if (isStream) {
+        res.write(JSON.stringify({ type: "error", error: "Rate limit reached (10 checks per minute). Please wait a moment." }) + "\n");
+        return res.end();
+      }
       return res.status(429).json({
         error: "Rate limit reached (10 checks per minute). Please wait a moment before running another check."
       });
@@ -395,6 +414,10 @@ app.post(["/api/visual-review", "/visual-review"], async (req, res) => {
 
     const { image, channel, draftTitle } = req.body;
     if (!image) {
+      if (isStream) {
+        res.write(JSON.stringify({ type: "error", error: "Image data is required (base64 PNG, JPG, or WebP)." }) + "\n");
+        return res.end();
+      }
       return res.status(400).json({ error: "Image data is required (base64 PNG, JPG, or WebP)." });
     }
 
@@ -404,22 +427,31 @@ app.post(["/api/visual-review", "/visual-review"], async (req, res) => {
       const base64Data = image.includes("base64,") ? image.split("base64,")[1] : image;
       buffer = Buffer.from(base64Data, "base64");
     } catch (parseErr) {
+      if (isStream) {
+        res.write(JSON.stringify({ type: "error", error: "Invalid base64 image data." }) + "\n");
+        return res.end();
+      }
       return res.status(400).json({ error: "Invalid base64 image data." });
     }
 
     // Validate size (max 4 MB)
     if (buffer.length > 4 * 1024 * 1024) {
+      if (isStream) {
+        res.write(JSON.stringify({ type: "error", error: "Image file exceeds maximum allowed size of 4 MB." }) + "\n");
+        return res.end();
+      }
       return res.status(400).json({ error: "Image file exceeds maximum allowed size of 4 MB." });
     }
 
-    // Run Visual Audit pipeline
+    // Run Visual Audit pipeline with onStage callback
     const auditResult = await runVisualAudit({
       imageBuffer: buffer,
       visualSettings: req.workspace.visualSettings,
       rules: req.workspace.rules,
       facts: req.workspace.facts,
       apiKey: GEMINI_API_KEY,
-      workspaceId: req.workspaceId
+      workspaceId: req.workspaceId,
+      onStage: sendStage
     });
 
     // Create persistent visual draft in workspace
@@ -443,12 +475,13 @@ app.post(["/api/visual-review", "/visual-review"], async (req, res) => {
       contrastResults: auditResult.contrast_results,
       paletteSummary: auditResult.palette_summary,
       regions: auditResult.regions,
+      timings_ms: auditResult.timings_ms,
       history: [
         {
           id: `h-${Date.now()}`,
           timestamp: new Date().toISOString(),
           actor: "BrandGuard Visual Auditor",
-          action: `Visual audit completed (${auditResult.findings.length} findings kept, ${auditResult.stats.dropped_by_validator} dropped by validator)`
+          action: `Visual audit completed in ${auditResult.timings_ms?.total || 0}ms (${auditResult.findings.length} findings kept, ${auditResult.stats.dropped_by_validator} dropped)`
         }
       ],
       comments: []
@@ -457,17 +490,32 @@ app.post(["/api/visual-review", "/visual-review"], async (req, res) => {
     req.workspace.drafts.unshift(newDraft);
     req.saveWs();
 
-    res.json({
+    const responsePayload = {
       draftId: newDraft.id,
       draft: newDraft,
+      timings_ms: auditResult.timings_ms,
       ...auditResult
-    });
+    };
+
+    if (isStream) {
+      res.write(JSON.stringify({ type: "complete", data: responsePayload }) + "\n");
+      return res.end();
+    }
+
+    res.json(responsePayload);
   } catch (err) {
     console.error("[Visual Review Fatal Error]:", err);
     const isClientErr = err.message.includes("format") || err.message.includes("size") || err.message.includes("Unreadable");
-    res.status(isClientErr ? 400 : 500).json({
-      error: err.message || "An unexpected error occurred during visual review."
-    });
+    if (isStream && !res.headersSent) {
+      res.status(isClientErr ? 400 : 500).json({ error: err.message || "An unexpected error occurred during visual review." });
+    } else if (isStream) {
+      res.write(JSON.stringify({ type: "error", error: err.message || "An unexpected error occurred." }) + "\n");
+      res.end();
+    } else {
+      res.status(isClientErr ? 400 : 500).json({
+        error: err.message || "An unexpected error occurred during visual review."
+      });
+    }
   }
 });
 

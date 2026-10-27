@@ -162,19 +162,61 @@ Return valid JSON only matching this schema:
   "campuspro_logo_detected": false
 }`;
 
+import crypto from "crypto";
+
+// --- In-Memory Cache (SHA-256) ---
+const visualAuditCache = new Map();
+
+export function clearVisualAuditCache() {
+  visualAuditCache.clear();
+}
+
 export async function runVisualAudit({
   imageBuffer,
   visualSettings = {},
   rules = [],
   facts = [],
   apiKey,
-  workspaceId
+  workspaceId,
+  onStage
 }) {
   if (!apiKey) {
     throw new Error("GEMINI_API_KEY is not configured.");
   }
 
-  // 1. Validate real file type by content using sharp metadata
+  const tOverall0 = Date.now();
+
+  // 1. SHA-256 Cache Check
+  const sha256 = crypto.createHash("sha256").update(imageBuffer).digest("hex");
+  const cacheKey = `${workspaceId}_${sha256}_${(visualSettings?.palette || []).join("")}_${visualSettings?.minContrastRatio || 4.5}_${visualSettings?.disclaimerPhrase || ""}`;
+
+  if (visualAuditCache.has(cacheKey)) {
+    const cached = JSON.parse(JSON.stringify(visualAuditCache.get(cacheKey)));
+    cached.timings_ms = {
+      upload: 1,
+      resize: 0,
+      gemini_ocr: 0,
+      review: 0,
+      validator: 0,
+      contrast: 0,
+      palette: 0,
+      total: 1,
+      cached: true
+    };
+    if (onStage) {
+      onStage("upload", "Image verified (cached)", 1);
+      onStage("resize", "Downscaled (cached)", 0);
+      onStage("gemini_ocr", "Gemini OCR (cached)", 0);
+      onStage("palette", "Palette compliance (cached)", 0);
+      onStage("contrast", "Typography contrast (cached)", 0);
+      onStage("review", "Brand rules review (cached)", 0);
+      onStage("validator", "Validation & deduplication (cached)", 0);
+    }
+    return cached;
+  }
+
+  // 2. STAGE: UPLOAD & FORMAT VALIDATION
+  const tUpload0 = Date.now();
   let metadata;
   try {
     metadata = await sharp(imageBuffer).metadata();
@@ -188,18 +230,32 @@ export async function runVisualAudit({
       `Unsupported image format "${metadata?.format || "unknown"}". Allowed formats: PNG, JPG, WebP.`
     );
   }
+  const uploadTime = Math.max(1, Date.now() - tUpload0);
+  if (onStage) onStage("upload", "Image uploaded & format validated", uploadTime);
 
-  // 2. Downscale with sharp to max 1600 px (preserving aspect ratio)
+  // 3. STAGE: RESIZE (downscale to max 1024px and create ~200px copy)
+  const tResize0 = Date.now();
   const downscaledBuffer = await sharp(imageBuffer)
-    .resize({ width: 1600, height: 1600, fit: "inside", withoutEnlargement: true })
-    .toFormat("jpeg", { quality: 90 })
+    .resize({ width: 1024, height: 1024, fit: "inside", withoutEnlargement: true })
+    .toFormat("jpeg", { quality: 85 })
     .toBuffer();
 
   const dsMeta = await sharp(downscaledBuffer).metadata();
   const imgWidth = dsMeta.width || 800;
   const imgHeight = dsMeta.height || 600;
 
-  // 3. Store compressed copy (max 1200 px JPEG quality 80) in workspace directory
+  // ~200px copy for fast pixel analysis
+  const thumb200Buffer = await sharp(downscaledBuffer)
+    .resize(200, 200, { fit: "inside" })
+    .removeAlpha()
+    .raw()
+    .toBuffer();
+
+  const thumb200Meta = await sharp(downscaledBuffer)
+    .resize(200, 200, { fit: "inside" })
+    .metadata();
+
+  // Store compressed copy (max 1200 px JPEG quality 80) in workspace directory
   const imageDir = getWorkspaceImagesDir(workspaceId);
   const imageId = `img_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const compressedFileName = `${imageId}.jpg`;
@@ -211,350 +267,398 @@ export async function runVisualAudit({
     .toFile(compressedFilePath);
 
   const imageUrl = `/api/workspaces/images/${workspaceId}/${compressedFileName}`;
+  const resizeTime = Math.max(1, Date.now() - tResize0);
+  if (onStage) onStage("resize", "Downscaled to 1024px and thumbnail generated", resizeTime);
 
-  // 4. Call Gemini Vision with model fallback
+  // 4. PARALLEL STAGE 1: Gemini Vision OCR + CIE Lab Palette Analysis
   const base64Image = downscaledBuffer.toString("base64");
-  let visionData = null;
-  let lastVisionError = null;
+  const brandPalette = (visualSettings.palette && visualSettings.palette.length > 0)
+    ? visualSettings.palette
+    : ["#1D4ED8", "#0F172A", "#FFFFFF", "#F59E0B"];
 
-  for (const model of CANDIDATE_MODELS) {
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 15000);
+  const runOcrTask = async () => {
+    const t0 = Date.now();
+    let visionData = null;
+    let lastVisionError = null;
 
-      const response = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          system_instruction: { parts: [{ text: VISION_SYSTEM_INSTRUCTION }] },
-          contents: [
-            {
-              role: "user",
-              parts: [
-                { inline_data: { mime_type: "image/jpeg", data: base64Image } },
-                { text: "Extract text, text bounding boxes, alt text, and CampusPro logo status." }
-              ]
-            }
-          ],
-          generationConfig: {
-            response_mime_type: "application/json",
-            temperature: 0.1
-          }
-        }),
-        signal: controller.signal
-      });
-      clearTimeout(timeout);
-
-      if (response.ok) {
-        const rawJson = await response.json();
-        let rawText = rawJson.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
-        rawText = rawText.trim();
-        if (rawText.startsWith("```json")) rawText = rawText.slice(7);
-        if (rawText.startsWith("```")) rawText = rawText.slice(3);
-        if (rawText.endsWith("```")) rawText = rawText.slice(0, -3);
-        rawText = rawText.trim();
-
-        visionData = JSON.parse(rawText);
-        break;
-      } else {
-        const errBody = await response.text();
-        console.warn(`[Visual Gemini ${model}] ${response.status}: ${errBody.slice(0, 100)}`);
-        lastVisionError = new Error(`Vision model returned ${response.status}`);
-      }
-    } catch (err) {
-      console.warn(`[Visual Gemini ${model}] failed: ${err.message}`);
-      lastVisionError = err;
-    }
-  }
-
-  if (!visionData) {
-    console.warn("[Visual Review] Gemini Vision failed across all models:", lastVisionError?.message);
-    visionData = {
-      extracted_text: "",
-      text_regions: [],
-      alt_text: "Marketing banner image.",
-      campuspro_logo_detected: false
+    let genConfig = {
+      responseMimeType: "application/json",
+      temperature: 0,
+      maxOutputTokens: 1024,
+      thinkingConfig: { thinkingBudget: 0 }
     };
-  }
+
+    const buildPayload = (cfg) => ({
+      system_instruction: { parts: [{ text: VISION_SYSTEM_INSTRUCTION }] },
+      contents: [
+        {
+          role: "user",
+          parts: [
+            { inline_data: { mime_type: "image/jpeg", data: base64Image } },
+            { text: "Extract text, text bounding boxes, alt text, and CampusPro logo status." }
+          ]
+        }
+      ],
+      generationConfig: cfg
+    });
+
+    for (const model of CANDIDATE_MODELS) {
+      try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 8000);
+
+        let response = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(buildPayload(genConfig)),
+          signal: controller.signal
+        });
+
+        // If thinkingConfig unsupported, retry without thinkingConfig immediately
+        if (response.status === 400 && genConfig.thinkingConfig) {
+          const noThinkingCfg = { ...genConfig };
+          delete noThinkingCfg.thinkingConfig;
+          response = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(buildPayload(noThinkingCfg)),
+            signal: controller.signal
+          });
+        }
+
+        clearTimeout(timeout);
+
+        if (response.ok) {
+          const rawJson = await response.json();
+          let rawText = rawJson.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+          rawText = rawText.trim();
+          if (rawText.startsWith("```json")) rawText = rawText.slice(7);
+          if (rawText.startsWith("```")) rawText = rawText.slice(3);
+          if (rawText.endsWith("```")) rawText = rawText.slice(0, -3);
+          rawText = rawText.trim();
+
+          visionData = JSON.parse(rawText);
+          break;
+        } else {
+          const errBody = await response.text();
+          console.warn(`[Visual Gemini ${model}] ${response.status}: ${errBody.slice(0, 100)}`);
+          lastVisionError = new Error(`Vision model returned ${response.status}`);
+        }
+      } catch (err) {
+        console.warn(`[Visual Gemini ${model}] failed: ${err.message}`);
+        lastVisionError = err;
+      }
+    }
+
+    if (!visionData) {
+      console.warn("[Visual Review] Gemini Vision failed across all models:", lastVisionError?.message);
+      visionData = {
+        extracted_text: "",
+        text_regions: [],
+        alt_text: "Marketing banner image.",
+        campuspro_logo_detected: false
+      };
+    }
+
+    const dur = Math.max(1, Date.now() - t0);
+    if (onStage) onStage("gemini_ocr", "Gemini Vision OCR text extracted", dur);
+    return { visionData, dur };
+  };
+
+  const runPaletteTask = async () => {
+    const t0 = Date.now();
+    let paletteSummary = {
+      brand_palette: brandPalette,
+      measured: false,
+      off_palette_percentage: null,
+      on_palette_percentage: null,
+      top_off_palette_hex: [],
+      status: "not_measured"
+    };
+
+    try {
+      const w = thumb200Meta.width || 200;
+      const h = thumb200Meta.height || 200;
+      const totalPixels = w * h;
+
+      if (thumb200Buffer && thumb200Buffer.length >= totalPixels * 3) {
+        const brandLabs = brandPalette.map(hex => rgbToLab(...hexToRgb(hex)));
+        let onPaletteCount = 0;
+        let offPaletteCount = 0;
+        const offColorCounts = new Map();
+
+        // Sample up to 10,000 pixels for instantaneous computation
+        const step = Math.max(1, Math.floor(totalPixels / 10000));
+        let sampledCount = 0;
+
+        for (let i = 0; i < totalPixels; i += step) {
+          const offset = i * 3;
+          if (offset + 2 >= thumb200Buffer.length) break;
+          sampledCount++;
+          const r = thumb200Buffer[offset];
+          const g = thumb200Buffer[offset + 1];
+          const b = thumb200Buffer[offset + 2];
+
+          const pLab = rgbToLab(r, g, b);
+
+          let minDistance = Infinity;
+          for (const bLab of brandLabs) {
+            const d = labDistance(pLab, bLab);
+            if (d < minDistance) minDistance = d;
+          }
+
+          if (minDistance <= 22) {
+            onPaletteCount++;
+          } else {
+            offPaletteCount++;
+            const qR = Math.round(r / 32) * 32;
+            const qG = Math.round(g / 32) * 32;
+            const qB = Math.round(b / 32) * 32;
+            const qHex = rgbToHex(qR, qG, qB);
+            offColorCounts.set(qHex, (offColorCounts.get(qHex) || 0) + 1);
+          }
+        }
+
+        const onPalettePct = Math.round((onPaletteCount / Math.max(1, sampledCount)) * 100);
+        const offPalettePct = 100 - onPalettePct;
+        const topOffColors = [...offColorCounts.entries()]
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 3)
+          .map(([hex]) => hex);
+
+        const isNonCompliant = onPalettePct < 75;
+
+        paletteSummary = {
+          brand_palette: brandPalette,
+          measured: true,
+          flagged: isNonCompliant,
+          off_palette_percentage: offPalettePct,
+          on_palette_percentage: onPalettePct,
+          top_off_palette_hex: topOffColors,
+          status: isNonCompliant ? "non_compliant" : "compliant"
+        };
+      }
+    } catch (palErr) {
+      console.warn("[Palette Check Error]:", palErr.message);
+      paletteSummary.measured = false;
+      paletteSummary.status = "not_measured";
+    }
+
+    const dur = Math.max(1, Date.now() - t0);
+    if (onStage) onStage("palette", "CIE Lab palette compliance computed", dur);
+    return { paletteSummary, dur };
+  };
+
+  // Launch OCR and Palette in parallel
+  const [ocrOutcome, paletteOutcome] = await Promise.all([runOcrTask(), runPaletteTask()]);
+  const visionData = ocrOutcome.visionData;
+  const geminiOcrTime = ocrOutcome.dur;
+  const paletteSummary = paletteOutcome.paletteSummary;
+  const paletteTime = paletteOutcome.dur;
 
   const extractedText = (visionData.extracted_text || "").trim();
   const textRegions = Array.isArray(visionData.text_regions) ? visionData.text_regions : [];
   let altText = (visionData.alt_text || "").trim().slice(0, 125);
-  // Match CampusPro logo explicitly
   const hasLogo = Boolean(visionData.campuspro_logo_detected);
 
   const allFindings = [];
 
-  // 5. PROMPT INJECTION SCANNER: Run before review step
+  // Prompt injection scanner on extracted text
   const injectionFindings = detectPromptInjection(extractedText);
   for (const inj of injectionFindings) {
     allFindings.push(inj);
   }
 
-  // 6. TEXT CHECK: send extracted_text through existing review + validator
-  let keptTextCount = 0;
-  let droppedTextCount = 0;
-
-  if (extractedText !== "") {
-    try {
-      const activeRules = [...rules, ...(visualSettings?.rules || [])];
-      const reviewResult = await callGeminiReview({
-        apiKey,
-        draftText: extractedText,
-        rules: activeRules,
-        facts
-      });
-      const rawAiFindings = Array.isArray(reviewResult) ? reviewResult : (reviewResult.findings || []);
-
-      const validated = validateFindings(extractedText, rawAiFindings, activeRules, facts);
-      keptTextCount = validated.accepted.length;
-      droppedTextCount = validated.rejected.length;
-
-      for (const finding of validated.accepted) {
-        allFindings.push({
-          ...finding,
-          source: "text"
-        });
-      }
-    } catch (textErr) {
-      console.warn("[Visual Text Review Error]:", textErr.message);
-    }
-  }
-
-  // 7. CONTRAST CHECK: Compute in code from sampled colors for each text region
+  // 5. PARALLEL STAGE 2: Text Review + Typography WCAG Contrast Analysis
   const minContrastRatio = Number(visualSettings.minContrastRatio) || 4.5;
-  const contrastResults = [];
 
-  for (let i = 0; i < textRegions.length; i++) {
-    const region = textRegions[i];
-    const left = Math.max(0, Math.floor((region.x || 0) * imgWidth));
-    const top = Math.max(0, Math.floor((region.y || 0) * imgHeight));
-    const width = Math.min(imgWidth - left, Math.max(1, Math.floor((region.w || 0.1) * imgWidth)));
-    const height = Math.min(imgHeight - top, Math.max(1, Math.floor((region.h || 0.1) * imgHeight)));
-
-    if (width < 4 || height < 4 || left + width > imgWidth || top + height > imgHeight) {
-      region.contrastRatio = null;
-      region.calculationType = "estimated";
-      region.passesContrast = null;
-      contrastResults.push({
-        text: region.text,
-        measured: false,
-        calculationType: "estimated",
-        reason: "could not measure (region bounds invalid)",
-        needs_human_judgement: true
-      });
-      continue;
+  const runTextReviewTask = async () => {
+    const t0 = Date.now();
+    let rawAiFindings = [];
+    if (extractedText !== "") {
+      try {
+        const activeRules = [...rules, ...(visualSettings?.rules || [])];
+        const reviewResult = await callGeminiReview({
+          apiKey,
+          draftText: extractedText,
+          rules: activeRules,
+          facts
+        });
+        rawAiFindings = Array.isArray(reviewResult) ? reviewResult : (reviewResult.findings || []);
+      } catch (textErr) {
+        console.warn("[Visual Text Review Error]:", textErr.message);
+      }
     }
-
-    try {
-      const regionBuffer = await sharp(downscaledBuffer)
-        .removeAlpha()
-        .extract({ left, top, width, height })
-        .raw()
-        .toBuffer();
-
-      const numPixels = width * height;
-      const sampledPixels = [];
-
-      // Sample up to 600 pixels across the text region
-      const step = Math.max(1, Math.floor(numPixels / 600));
-      for (let p = 0; p < numPixels; p += step) {
-        const offset = p * 3;
-        if (offset + 2 < regionBuffer.length) {
-          const r = regionBuffer[offset];
-          const g = regionBuffer[offset + 1];
-          const b = regionBuffer[offset + 2];
-          const lum = getRelativeLuminance(r, g, b);
-          sampledPixels.push({ r, g, b, lum });
-        }
-      }
-
-      if (sampledPixels.length < 2) {
-        region.contrastRatio = null;
-        region.calculationType = "estimated";
-        region.passesContrast = null;
-        contrastResults.push({
-          text: region.text,
-          measured: false,
-          calculationType: "estimated",
-          reason: "could not measure",
-          needs_human_judgement: true
-        });
-        continue;
-      }
-
-      // Estimate text and background by majority vs minority clustering
-      const clusters = estimateTextAndBgClusters(sampledPixels);
-      if (!clusters) {
-        region.contrastRatio = null;
-        region.calculationType = "estimated";
-        region.passesContrast = null;
-        contrastResults.push({
-          text: region.text,
-          measured: false,
-          calculationType: "estimated",
-          reason: "could not measure",
-          needs_human_judgement: true
-        });
-        continue;
-      }
-
-      const fgHex = clusters.textHex;
-      const bgHex = clusters.bgHex;
-      const ratio = getContrastRatio(clusters.textRgb, clusters.bgRgb);
-
-      const ratioNum = Number(ratio.toFixed(2));
-      const passesContrast = ratioNum >= minContrastRatio;
-
-      // Assign directly to region object for frontend overlays and lists
-      region.contrastRatio = ratioNum;
-      region.fgColor = fgHex;
-      region.bgColor = bgHex;
-      region.calculationType = "computed";
-      region.passesContrast = passesContrast;
-
-      const resultItem = {
-        text: region.text,
-        measured: true,
-        calculationType: "computed",
-        ratio: ratioNum,
-        requiredRatio: minContrastRatio,
-        foregroundHex: fgHex,
-        backgroundHex: bgHex,
-        passes: passesContrast
-      };
-      contrastResults.push(resultItem);
-
-      if (ratio < minContrastRatio) {
-        allFindings.push({
-          id: `finding-contrast-${Date.now()}-${i}`,
-          rule_id: "V-01",
-          quote: region.text,
-          category: "accessibility",
-          severity: "high",
-          explanation: `Text contrast ratio is ${ratio.toFixed(2)}:1 (foreground ${fgHex}, background ${bgHex}), which fails the minimum required ${minContrastRatio}:1 (WCAG AA). [computed]`,
-          suggested_fix: `Change text colour (${fgHex}) to meet at least ${minContrastRatio}:1 minimum contrast ratio against background (${bgHex}).`,
-          needs_human_judgement: true,
-          source: "contrast",
-          measured_ratio: Number(ratio.toFixed(2)),
-          foreground_hex: fgHex,
-          background_hex: bgHex,
-          status: "pending"
-        });
-      }
-    } catch (contrastErr) {
-      console.warn(`[Contrast Sampling Error on "${region.text}"]:`, contrastErr.message);
-      region.contrastRatio = null;
-      region.calculationType = "estimated";
-      region.passesContrast = null;
-      contrastResults.push({
-        text: region.text,
-        measured: false,
-        calculationType: "estimated",
-        reason: "could not measure",
-        needs_human_judgement: true
-      });
-    }
-  }
-
-  // 8. PALETTE CHECK (V-02): Computed server-side from pixels downscaled to ~100px
-  const brandPalette = (visualSettings.palette && visualSettings.palette.length > 0)
-    ? visualSettings.palette
-    : ["#1D4ED8", "#0F172A", "#FFFFFF", "#F59E0B"];
-
-  let paletteSummary = {
-    brand_palette: brandPalette,
-    measured: false,
-    off_palette_percentage: null,
-    on_palette_percentage: null,
-    top_off_palette_hex: [],
-    status: "not_measured"
+    const dur = Math.max(1, Date.now() - t0);
+    if (onStage) onStage("review", "Brand rules & fact review completed", dur);
+    return { rawAiFindings, dur };
   };
 
-  try {
-    const thumbBuffer = await sharp(downscaledBuffer)
-      .removeAlpha()
-      .resize(100, 100, { fit: "fill" })
-      .raw()
-      .toBuffer();
+  const runContrastTask = async () => {
+    const t0 = Date.now();
+    const contrastResults = [];
+    const contrastFindings = [];
 
-    const totalPixels = 100 * 100; // 10000 pixels
-    if (thumbBuffer && thumbBuffer.length >= totalPixels * 3) {
-      const brandLabs = brandPalette.map(hex => rgbToLab(...hexToRgb(hex)));
-      let onPaletteCount = 0;
-      let offPaletteCount = 0;
-      const offColorCounts = new Map();
+    for (let i = 0; i < textRegions.length; i++) {
+      const region = textRegions[i];
+      const left = Math.max(0, Math.floor((region.x || 0) * imgWidth));
+      const top = Math.max(0, Math.floor((region.y || 0) * imgHeight));
+      const width = Math.min(imgWidth - left, Math.max(1, Math.floor((region.w || 0.1) * imgWidth)));
+      const height = Math.min(imgHeight - top, Math.max(1, Math.floor((region.h || 0.1) * imgHeight)));
 
-      for (let i = 0; i < totalPixels; i++) {
-        const offset = i * 3;
-        const r = thumbBuffer[offset];
-        const g = thumbBuffer[offset + 1];
-        const b = thumbBuffer[offset + 2];
-
-        const pLab = rgbToLab(r, g, b);
-
-        let minDistance = Infinity;
-        for (const bLab of brandLabs) {
-          const d = labDistance(pLab, bLab);
-          if (d < minDistance) minDistance = d;
-        }
-
-        // delta-E threshold 22 for brand palette match
-        if (minDistance <= 22) {
-          onPaletteCount++;
-        } else {
-          offPaletteCount++;
-          // Quantize off-palette color (step of 32)
-          const qR = Math.round(r / 32) * 32;
-          const qG = Math.round(g / 32) * 32;
-          const qB = Math.round(b / 32) * 32;
-          const qHex = rgbToHex(qR, qG, qB);
-          offColorCounts.set(qHex, (offColorCounts.get(qHex) || 0) + 1);
-        }
+      if (width < 4 || height < 4 || left + width > imgWidth || top + height > imgHeight) {
+        region.contrastRatio = null;
+        region.calculationType = "estimated";
+        region.passesContrast = null;
+        contrastResults.push({
+          text: region.text,
+          measured: false,
+          calculationType: "estimated",
+          reason: "could not measure (region bounds invalid)",
+          needs_human_judgement: true
+        });
+        continue;
       }
 
-      const onPalettePct = Math.round((onPaletteCount / totalPixels) * 100);
-      const offPalettePct = 100 - onPalettePct;
-      const topOffColors = [...offColorCounts.entries()]
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 3)
-        .map(([hex]) => hex);
+      try {
+        const regionBuffer = await sharp(downscaledBuffer)
+          .removeAlpha()
+          .extract({ left, top, width, height })
+          .raw()
+          .toBuffer();
 
-      const isNonCompliant = onPalettePct < 75; // Brand requires >= 75% on-palette
+        const numPixels = width * height;
+        const sampledPixels = [];
+        const step = Math.max(1, Math.floor(numPixels / 600));
+        for (let p = 0; p < numPixels; p += step) {
+          const offset = p * 3;
+          if (offset + 2 < regionBuffer.length) {
+            const r = regionBuffer[offset];
+            const g = regionBuffer[offset + 1];
+            const b = regionBuffer[offset + 2];
+            const lum = getRelativeLuminance(r, g, b);
+            sampledPixels.push({ r, g, b, lum });
+          }
+        }
 
-      paletteSummary = {
-        brand_palette: brandPalette,
-        measured: true,
-        flagged: isNonCompliant,
-        off_palette_percentage: offPalettePct,
-        on_palette_percentage: onPalettePct,
-        top_off_palette_hex: topOffColors,
-        status: isNonCompliant ? "non_compliant" : "compliant"
-      };
+        if (sampledPixels.length < 2) {
+          region.contrastRatio = null;
+          region.calculationType = "estimated";
+          region.passesContrast = null;
+          contrastResults.push({
+            text: region.text,
+            measured: false,
+            calculationType: "estimated",
+            reason: "could not measure",
+            needs_human_judgement: true
+          });
+          continue;
+        }
 
-      if (isNonCompliant) {
-        allFindings.push({
-          id: `finding-palette-${Date.now()}`,
-          rule_id: "V-02",
-          quote: "(Image color palette)",
-          category: "brand",
-          severity: "medium",
-          explanation: `Only ${onPalettePct}% of image pixels match the brand palette (required >= 75%). Top off-palette colours: ${topOffColors.join(", ")}. [computed]`,
-          suggested_fix: `Adjust banner background and accents (${topOffColors.join(", ")}) to adhere to approved brand colours (${brandPalette.join(", ")}).`,
-          needs_human_judgement: true,
-          source: "palette",
-          status: "pending"
+        const clusters = estimateTextAndBgClusters(sampledPixels);
+        if (!clusters) {
+          region.contrastRatio = null;
+          region.calculationType = "estimated";
+          region.passesContrast = null;
+          contrastResults.push({
+            text: region.text,
+            measured: false,
+            calculationType: "estimated",
+            reason: "could not measure",
+            needs_human_judgement: true
+          });
+          continue;
+        }
+
+        const fgHex = clusters.textHex;
+        const bgHex = clusters.bgHex;
+        const ratio = getContrastRatio(clusters.textRgb, clusters.bgRgb);
+        const ratioNum = Number(ratio.toFixed(2));
+        const passesContrast = ratioNum >= minContrastRatio;
+
+        region.contrastRatio = ratioNum;
+        region.fgColor = fgHex;
+        region.bgColor = bgHex;
+        region.calculationType = "computed";
+        region.passesContrast = passesContrast;
+
+        contrastResults.push({
+          text: region.text,
+          measured: true,
+          calculationType: "computed",
+          ratio: ratioNum,
+          requiredRatio: minContrastRatio,
+          foregroundHex: fgHex,
+          backgroundHex: bgHex,
+          passes: passesContrast
+        });
+
+        if (ratio < minContrastRatio) {
+          contrastFindings.push({
+            id: `finding-contrast-${Date.now()}-${i}`,
+            rule_id: "V-01",
+            quote: region.text,
+            category: "accessibility",
+            severity: "high",
+            explanation: `Text contrast ratio is ${ratio.toFixed(2)}:1 (foreground ${fgHex}, background ${bgHex}), which fails the minimum required ${minContrastRatio}:1 (WCAG AA). [computed]`,
+            suggested_fix: `Change text colour (${fgHex}) to meet at least ${minContrastRatio}:1 minimum contrast ratio against background (${bgHex}).`,
+            needs_human_judgement: true,
+            source: "contrast",
+            measured_ratio: ratioNum,
+            foreground_hex: fgHex,
+            background_hex: bgHex,
+            status: "pending"
+          });
+        }
+      } catch (contrastErr) {
+        console.warn(`[Contrast Sampling Error on "${region.text}"]:`, contrastErr.message);
+        region.contrastRatio = null;
+        region.calculationType = "estimated";
+        region.passesContrast = null;
+        contrastResults.push({
+          text: region.text,
+          measured: false,
+          calculationType: "estimated",
+          reason: "could not measure",
+          needs_human_judgement: true
         });
       }
     }
-  } catch (palErr) {
-    console.warn("[Palette Check Error]:", palErr.message);
-    paletteSummary.measured = false;
-    paletteSummary.status = "not_measured";
+
+    const dur = Math.max(1, Date.now() - t0);
+    if (onStage) onStage("contrast", "Typography WCAG contrast ratios computed", dur);
+    return { contrastResults, contrastFindings, dur };
+  };
+
+  // Launch Review and Contrast tasks in parallel
+  const [reviewOutcome, contrastOutcome] = await Promise.all([runTextReviewTask(), runContrastTask()]);
+  const rawAiFindings = reviewOutcome.rawAiFindings;
+  const reviewTime = reviewOutcome.dur;
+  const contrastResults = contrastOutcome.contrastResults;
+  const contrastTime = contrastOutcome.dur;
+
+  for (const cf of contrastOutcome.contrastFindings) {
+    allFindings.push(cf);
   }
 
-  // 9. DISCLAIMER CHECK: if disclaimer phrase set and not found
+  // Add palette finding if non-compliant
+  if (paletteSummary.flagged) {
+    allFindings.push({
+      id: `finding-palette-${Date.now()}`,
+      rule_id: "V-02",
+      quote: "(Image color palette)",
+      category: "brand",
+      severity: "medium",
+      explanation: `Only ${paletteSummary.on_palette_percentage}% of image pixels match the brand palette (required >= 75%). Top off-palette colours: ${paletteSummary.top_off_palette_hex.join(", ")}. [computed]`,
+      suggested_fix: `Adjust banner background and accents (${paletteSummary.top_off_palette_hex.join(", ")}) to adhere to approved brand colours (${brandPalette.join(", ")}).`,
+      needs_human_judgement: true,
+      source: "palette",
+      status: "pending"
+    });
+  }
+
+  // 6. DISCLAIMER & ALT TEXT CHECKS
   const disclaimerPhrase = (visualSettings.disclaimerPhrase || "").trim();
   if (disclaimerPhrase !== "") {
     const found = extractedText.toLowerCase().includes(disclaimerPhrase.toLowerCase());
@@ -574,7 +678,6 @@ export async function runVisualAudit({
     }
   }
 
-  // 10. ALT TEXT CHECK: flag V-03 only if initial alt text is empty or cleared
   if (!altText || altText.trim() === "") {
     allFindings.push({
       id: `finding-alt-${Date.now()}`,
@@ -590,17 +693,68 @@ export async function runVisualAudit({
     });
   }
 
-  // 11. DEDUPE & MERGE: merge overlapping or nested findings of same rule_id (keep longest span)
-  const { mergedFindings, mergedCount } = mergeFindings(allFindings, extractedText);
+  // 7. STAGE: VALIDATOR (Only call validator / retry when a finding fails rule-based checks, max 1 retry)
+  const tValidator0 = Date.now();
+  let droppedTextCount = 0;
+  const activeRules = [...rules, ...(visualSettings?.rules || [])];
 
-  // De-duplicate different rules on exact same text, keeping highest severity
+  if (rawAiFindings.length > 0 && extractedText !== "") {
+    // Check if any finding fails rule-based checks
+    const validRuleIds = new Set([
+      ...activeRules.map(r => r.id.trim().toUpperCase()),
+      ...facts.map(f => f.id.trim().toUpperCase())
+    ]);
+
+    const needsFullValidation = rawAiFindings.some(f => {
+      const q = (f.quote || "").trim();
+      const rId = (f.rule_id || "").trim().toUpperCase();
+      const fix = (f.suggested_fix || "").trim();
+      const exp = (f.explanation || "").trim();
+      return (
+        !q ||
+        !extractedText.includes(q) ||
+        !validRuleIds.has(rId) ||
+        (fix && q && fix.toLowerCase() === q.toLowerCase()) ||
+        /\bwait\b/i.test(exp) ||
+        /\bhowever\b/i.test(exp)
+      );
+    });
+
+    if (needsFullValidation) {
+      const validated = validateFindings(extractedText, rawAiFindings, activeRules, facts);
+      droppedTextCount = validated.rejected.length;
+      for (const f of validated.accepted) {
+        allFindings.push({ ...f, source: "text" });
+      }
+    } else {
+      // Direct pass - all findings adhere to rule checks
+      for (let i = 0; i < rawAiFindings.length; i++) {
+        const f = rawAiFindings[i];
+        allFindings.push({
+          id: `finding-text-${Date.now()}-${i}`,
+          quote: (f.quote || "").trim(),
+          rule_id: (f.rule_id || "").trim().toUpperCase(),
+          category: (f.category || "claim").toLowerCase(),
+          severity: ["high", "medium", "low"].includes((f.severity || "").toLowerCase()) ? f.severity.toLowerCase() : "medium",
+          explanation: (f.explanation || "").trim(),
+          suggested_fix: (f.suggested_fix || "").trim(),
+          action: "replace",
+          needs_human_judgement: Boolean(f.needs_human_judgement),
+          status: "pending",
+          source: "text"
+        });
+      }
+    }
+  }
+
+  // Deduplication & merge overlapping / nested findings
+  const { mergedFindings, mergedCount } = mergeFindings(allFindings, extractedText);
   const severityRank = { high: 3, medium: 2, low: 1 };
   const finalFindings = [];
   const quoteMap = new Map();
 
   for (const f of mergedFindings) {
     const key = (f.quote || "").trim().toLowerCase();
-    // Do not de-duplicate generic structural items like "(Image color palette)"
     if (!key || key.startsWith("(") || key.startsWith("[")) {
       finalFindings.push(f);
       continue;
@@ -628,7 +782,24 @@ export async function runVisualAudit({
     }
   }
 
-  return {
+  const validatorTime = Math.max(1, Date.now() - tValidator0);
+  if (onStage) onStage("validator", "Finding validation & deduplication verified", validatorTime);
+
+  const totalTime = Math.max(1, Date.now() - tOverall0);
+
+  const timings_ms = {
+    upload: uploadTime,
+    resize: resizeTime,
+    gemini_ocr: geminiOcrTime,
+    review: reviewTime,
+    validator: validatorTime,
+    contrast: contrastTime,
+    palette: paletteTime,
+    total: totalTime,
+    cached: false
+  };
+
+  const finalResult = {
     extracted_text: extractedText,
     regions: textRegions,
     alt_text: altText,
@@ -641,6 +812,12 @@ export async function runVisualAudit({
       dropped_by_validator: droppedTextCount,
       merged: mergedCount
     },
-    imageUrl
+    imageUrl,
+    timings_ms
   };
+
+  // Cache in-memory by SHA-256
+  visualAuditCache.set(cacheKey, finalResult);
+
+  return finalResult;
 }

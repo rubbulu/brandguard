@@ -36,16 +36,15 @@ If no problems are found, return:
 
 Return JSON only.`;
 
-export const ACTIVE_MODEL = process.env.GEMINI_MODEL || "gemini-flash-lite-latest";
+export const ACTIVE_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash";
 
 // Robust cascade prioritizing models with active quota and fast response
 export const CANDIDATE_MODELS = [
   ACTIVE_MODEL,
+  "gemini-3.5-flash",
   "gemini-flash-lite-latest",
   "gemini-3.5-flash-lite",
-  "gemini-3.5-flash",
-  "gemini-3.6-flash",
-  "gemini-3-flash-preview"
+  "gemini-3.6-flash"
 ].filter((v, i, a) => a.indexOf(v) === i);
 
 export async function callGeminiReview({ apiKey, draftText, rules, facts }) {
@@ -62,7 +61,16 @@ ${JSON.stringify(facts, null, 2)}
 DRAFT:
 ${draftText}`;
 
-  const payload = {
+  let genConfig = {
+    responseMimeType: "application/json",
+    temperature: 0,
+    maxOutputTokens: 1024,
+    thinkingConfig: {
+      thinkingBudget: 0
+    }
+  };
+
+  const buildPayload = (cfg) => ({
     system_instruction: {
       parts: [{ text: SYSTEM_INSTRUCTION }]
     },
@@ -72,11 +80,8 @@ ${draftText}`;
         parts: [{ text: userContent }]
       }
     ],
-    generationConfig: {
-      response_mime_type: "application/json",
-      temperature: 0.1
-    }
-  };
+    generationConfig: cfg
+  });
 
   let lastError = null;
 
@@ -84,14 +89,27 @@ ${draftText}`;
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 12000); // 12s timeout per candidate model
+      const timeout = setTimeout(() => controller.abort(), 8000); // 8s timeout with thinking off
 
-      const response = await fetch(url, {
+      let response = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(buildPayload(genConfig)),
         signal: controller.signal
       });
+
+      // If model does not support thinkingConfig (HTTP 400), retry instantly without thinkingConfig
+      if (response.status === 400 && genConfig.thinkingConfig) {
+        const noThinkingCfg = { ...genConfig };
+        delete noThinkingCfg.thinkingConfig;
+        response = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(buildPayload(noThinkingCfg)),
+          signal: controller.signal
+        });
+      }
+
       clearTimeout(timeout);
 
       if (response.ok) {

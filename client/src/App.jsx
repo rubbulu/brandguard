@@ -101,6 +101,15 @@ export default function App() {
   const [analyzingFilename, setAnalyzingFilename] = useState(null);
   const currentVisualReqIdRef = useRef(0);
   const currentVisualAbortControllerRef = useRef(null);
+  const [auditStages, setAuditStages] = useState({
+    upload: false,
+    resize: false,
+    gemini_ocr: false,
+    palette: false,
+    contrast: false,
+    review: false,
+    validator: false
+  });
 
   const handleCopyText = (text, id) => {
     if (navigator?.clipboard?.writeText) {
@@ -159,8 +168,12 @@ export default function App() {
     window.location.hash = `#/${role}`;
   };
 
-  // 2. Initial Setup, Guide Modal, and 30s Health Check Interval
+  // 2. Initial Setup, Guide Modal, and Health Pings (wakes up sleeping Render instance)
   useEffect(() => {
+    // Immediate health pings on page load to wake up sleeping Render instances before user uploads
+    fetch("/health").catch(() => {});
+    fetch("/api/health").catch(() => {});
+
     // Check if first-time visitor to auto-show guide modal
     const guideShown = localStorage.getItem("brandguard_guide_shown");
     if (!guideShown) {
@@ -292,11 +305,20 @@ export default function App() {
     setAnalyzingFilename(displayFilename);
     setIsVisualAuditing(true);
     setVisualAuditError(null);
+    setAuditStages({
+      upload: false,
+      resize: false,
+      gemini_ocr: false,
+      palette: false,
+      contrast: false,
+      review: false,
+      validator: false
+    });
 
     try {
-      const res = await wsFetch("/api/visual-review", {
+      const res = await wsFetch("/api/visual-review?stream=true", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-stream": "true" },
         signal: controller.signal,
         body: JSON.stringify({
           image: base64Image,
@@ -317,14 +339,50 @@ export default function App() {
         throw new Error(err.error || "Failed to analyze image.");
       }
 
-      const data = await res.json();
+      let data = null;
+      if (res.body && typeof res.body.getReader === "function") {
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop(); // keep last incomplete line
+
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+              const msg = JSON.parse(line);
+              if (msg.type === "stage") {
+                setAuditStages(prev => ({ ...prev, [msg.stage]: true }));
+              } else if (msg.type === "complete") {
+                data = msg.data;
+              } else if (msg.type === "error") {
+                throw new Error(msg.error);
+              }
+            } catch (err) {
+              if (err.message && !err.message.includes("JSON")) {
+                throw err;
+              }
+            }
+          }
+        }
+      }
+
+      if (!data) {
+        data = await res.json();
+      }
+
       if (reqId !== currentVisualReqIdRef.current) return;
 
       setActiveDraft(data.draft);
       setEditableAltText(data.alt_text || "");
       setAnalyzingFilename(null);
       await loadWorkspaceData();
-      showNotice(`Visual audit completed: ${data.findings.length} findings flagged.`);
+      showNotice(`Visual audit completed in ${data.timings_ms?.total || 0}ms (${data.findings?.length || 0} findings flagged).`);
     } catch (err) {
       if (err.name === "AbortError" || reqId !== currentVisualReqIdRef.current) {
         return;
@@ -1979,15 +2037,54 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Loading State while processing */}
+                {/* Loading State with real stages ticking off */}
                 {isVisualAuditing && (
-                  <div className="p-4 bg-blue-50 border border-blue-200 rounded-xl text-blue-900 flex items-center gap-3">
-                    <RefreshCw className="w-5 h-5 animate-spin text-blue-600 shrink-0" />
-                    <div>
-                      <p className="text-xs font-bold text-blue-900">Analysing {analyzingFilename || "banner"}...</p>
-                      <p className="text-[11px] text-blue-700 mt-0.5">
-                        Downscaling to max 1600px &bull; Calling Gemini Vision for OCR &bull; WCAG AA typography contrast check &bull; Verbatim text validator
-                      </p>
+                  <div className="p-4 bg-white border border-blue-200 rounded-2xl shadow-xs text-blue-900 space-y-3">
+                    <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                      <div className="flex items-center gap-2.5">
+                        <RefreshCw className="w-4 h-4 text-blue-600 animate-spin shrink-0" />
+                        <div>
+                          <p className="text-xs font-bold text-slate-800">Analysing {analyzingFilename || "banner"}...</p>
+                          <p className="text-[11px] text-slate-500">Real-time pipeline analysis in progress</p>
+                        </div>
+                      </div>
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 font-mono">
+                        Pipeline Active
+                      </span>
+                    </div>
+
+                    {/* Real stages that tick off */}
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1">
+                      {[
+                        { key: "upload", label: "Upload & validation" },
+                        { key: "resize", label: "Downscale & thumbnail" },
+                        { key: "gemini_ocr", label: "Gemini Vision OCR" },
+                        { key: "palette", label: "CIE Lab palette check" },
+                        { key: "contrast", label: "WCAG contrast clustering" },
+                        { key: "review", label: "Rules & fact review" },
+                        { key: "validator", label: "Validator & dedupe" }
+                      ].map(stage => {
+                        const isDone = auditStages[stage.key];
+                        return (
+                          <div
+                            key={stage.key}
+                            className={`flex items-center gap-1.5 p-2 rounded-xl text-[11px] transition-all ${
+                              isDone
+                                ? "bg-emerald-50 text-emerald-900 border border-emerald-200"
+                                : "bg-slate-50 text-slate-600 border border-slate-200"
+                            }`}
+                          >
+                            {isDone ? (
+                              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                            ) : (
+                              <div className="w-3 h-3 rounded-full border-2 border-blue-400 border-t-transparent animate-spin shrink-0" />
+                            )}
+                            <span className={isDone ? "font-bold text-emerald-900 truncate" : "truncate"}>
+                              {stage.label}
+                            </span>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 )}
@@ -2439,6 +2536,21 @@ export default function App() {
                     })}
                   </div>
                 </div>
+
+                {/* Total timing in small grey text under the result */}
+                {activeDraft?.timings_ms && (
+                  <div className="col-span-1 lg:col-span-12 text-center py-2">
+                    <p className="text-xs text-slate-400 font-mono">
+                      {activeDraft.timings_ms.cached ? (
+                        <span>⚡ Instant cached response ({activeDraft.timings_ms.total || 1}ms)</span>
+                      ) : (
+                        <span>
+                          Total: {activeDraft.timings_ms.total}ms (Upload: {activeDraft.timings_ms.upload}ms &bull; Resize: {activeDraft.timings_ms.resize}ms &bull; OCR: {activeDraft.timings_ms.gemini_ocr}ms &bull; Palette: {activeDraft.timings_ms.palette}ms &bull; Contrast: {activeDraft.timings_ms.contrast}ms &bull; Review: {activeDraft.timings_ms.review}ms &bull; Validator: {activeDraft.timings_ms.validator}ms)
+                        </span>
+                      )}
+                    </p>
+                  </div>
+                )}
               </div>
             ) : (
               /* Empty state if visitor hasn't run any draft yet */
