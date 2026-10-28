@@ -246,6 +246,154 @@ export function mergeFindings(findings, draftText = "") {
   return { mergedFindings: result, mergedCount, mergedList };
 }
 
+/**
+ * Convert string to normal sentence case while preserving brand names (e.g. CampusPro).
+ */
+export function convertToSentenceCase(text, brandNames = ["CampusPro"]) {
+  if (!text || typeof text !== "string") return text;
+
+  let working = text;
+  const brandPlaceholders = [];
+  brandNames.forEach((bName, idx) => {
+    const regex = new RegExp(`\\b${bName}\\b`, "gi");
+    working = working.replace(regex, () => {
+      const ph = `__BRAND_${idx}__`;
+      brandPlaceholders.push({ placeholder: ph, value: bName });
+      return ph;
+    });
+  });
+
+  // Lowercase all-caps words of 2+ letters
+  working = working.replace(/\b[A-Z]{2,}\b/g, (match) => {
+    return match.toLowerCase();
+  });
+
+  // Capitalize the first letter of each sentence/clause
+  working = working.replace(/(^\s*|[.!?]\s+)([a-z])/g, (m, prefix, letter) => {
+    return prefix + letter.toUpperCase();
+  });
+
+  // Restore brand names
+  brandPlaceholders.forEach(({ placeholder, value }) => {
+    working = working.split(placeholder).join(value);
+  });
+
+  return working;
+}
+
+/**
+ * Deterministic tone checks that run on every text draft, independent of Gemini:
+ * - T-05: Flags any word of 2+ letters that is fully uppercase, except the brand name (CampusPro) as written in the rules.
+ *         Suggests the same words in normal sentence case (e.g. "Buy now before it sells out!").
+ * - T-03: Flags when a draft has more than one exclamation mark.
+ *         Suggests removing excess exclamation marks so at most one remains.
+ */
+export function runDeterministicToneChecks(draftText, rules = [], brandNames = ["CampusPro"]) {
+  const findings = [];
+  if (!draftText || typeof draftText !== "string") return findings;
+
+  const ruleIds = new Set(rules.map(r => (r.id || "").toUpperCase()));
+  const hasT05 = rules.length === 0 || ruleIds.has("T-05");
+  const hasT03 = rules.length === 0 || ruleIds.has("T-03");
+
+  // --- T-05: No all-caps words except the brand name (CampusPro) ---
+  if (hasT05) {
+    const sentenceRegex = /[^.!?\n]+(?:[.!?\n]+|$)/g;
+    let m;
+    while ((m = sentenceRegex.exec(draftText)) !== null) {
+      const rawSentence = m[0];
+      const trimmed = rawSentence.trim();
+      if (!trimmed) continue;
+
+      const words = trimmed.match(/\b[A-Za-z0-9'-]+\b/g) || [];
+      const allCapsWords = words.filter(w => {
+        if (w.length < 2) return false;
+        if (!/^[A-Z]+$/.test(w)) return false;
+        // If it's already the exact brand name as written in rules, exempt it
+        if (brandNames.includes(w)) return false;
+        return true;
+      });
+
+      if (allCapsWords.length > 0) {
+        const fix = convertToSentenceCase(trimmed, brandNames);
+        if (fix !== trimmed) {
+          findings.push({
+            quote: trimmed,
+            rule_id: "T-05",
+            category: "tone",
+            severity: "low",
+            explanation: `No all-caps words except the brand name (${brandNames.join(", ")}). Use normal sentence case.`,
+            suggested_fix: fix,
+            action: "replace",
+            needs_human_judgement: false
+          });
+        }
+      }
+    }
+  }
+
+  // --- T-03: Friendly tone. At most one exclamation mark per post ---
+  if (hasT03) {
+    const totalExMarks = (draftText.match(/!/g) || []).length;
+    if (totalExMarks > 1) {
+      const sentenceRegex = /[^.!?\n]+(?:[.!?\n]+|$)/g;
+      const sentences = [];
+      let sm;
+      while ((sm = sentenceRegex.exec(draftText)) !== null) {
+        if (sm[0].trim()) {
+          sentences.push({
+            trimmed: sm[0].trim(),
+            hasExMark: sm[0].includes("!"),
+            exCount: (sm[0].match(/!/g) || []).length
+          });
+        }
+      }
+
+      let seenExMarks = 0;
+      for (const s of sentences) {
+        if (!s.hasExMark) continue;
+
+        if (seenExMarks === 0) {
+          if (s.exCount === 1) {
+            seenExMarks += 1;
+            continue;
+          } else {
+            // First sentence has multiple ! (e.g. "Buy now!!")
+            const fix = s.trimmed.replace(/!{2,}/g, "!");
+            findings.push({
+              quote: s.trimmed,
+              rule_id: "T-03",
+              category: "tone",
+              severity: "low",
+              explanation: "Friendly tone. At most one exclamation mark per post.",
+              suggested_fix: fix,
+              action: "replace",
+              needs_human_judgement: false
+            });
+            seenExMarks += 1;
+          }
+        } else {
+          // Additional sentences with ! exceed the limit of 1
+          const fix = s.trimmed.replace(/!+/g, ".");
+          findings.push({
+            quote: s.trimmed,
+            rule_id: "T-03",
+            category: "tone",
+            severity: "low",
+            explanation: "Friendly tone. At most one exclamation mark per post.",
+            suggested_fix: fix,
+            action: "replace",
+            needs_human_judgement: false
+          });
+          seenExMarks += s.exCount;
+        }
+      }
+    }
+  }
+
+  return findings;
+}
+
 export function validateFindings(draftText, rawFindings, rules = [], facts = []) {
   const validRuleIds = new Set([
     ...rules.map(r => r.id.trim().toUpperCase()),
@@ -253,10 +401,16 @@ export function validateFindings(draftText, rawFindings, rules = [], facts = [])
     "SEC-01", "V-01", "V-02", "V-03", "V-04"
   ]);
 
+  // Run deterministic checks that run on every text draft, independent of Gemini
+  const deterministicToneFindings = runDeterministicToneChecks(draftText, rules);
+
+  const rawList = Array.isArray(rawFindings) ? rawFindings : [];
+  const combinedRawFindings = [...rawList, ...deterministicToneFindings];
+
   const accepted = [];
   const rejected = [];
 
-  if (!Array.isArray(rawFindings)) {
+  if (!Array.isArray(rawFindings) && deterministicToneFindings.length === 0) {
     return {
       accepted: [],
       rejected: [{ reason: "AI response was not a valid list of findings", raw: rawFindings }],
@@ -265,8 +419,8 @@ export function validateFindings(draftText, rawFindings, rules = [], facts = [])
     };
   }
 
-  for (let i = 0; i < rawFindings.length; i++) {
-    const finding = rawFindings[i];
+  for (let i = 0; i < combinedRawFindings.length; i++) {
+    const finding = combinedRawFindings[i];
     const rejectionReasons = [];
 
     // 1. Verify finding is an object
@@ -294,8 +448,12 @@ export function validateFindings(draftText, rawFindings, rules = [], facts = [])
       rejectionReasons.push(`Quoted phrase "${quote}" was not found word-for-word in the draft text`);
     }
 
-    // 4. (a) Drop if suggested_fix equals the flagged text
-    if (suggestedFix && quote && suggestedFix.toLowerCase() === quote.toLowerCase()) {
+    // 4. (a) Drop if suggested_fix equals the flagged text (for case rule T-05, check exact match since fix changes case)
+    const isIdentical = (ruleId === "T-05")
+      ? (suggestedFix === quote)
+      : (suggestedFix.toLowerCase() === quote.toLowerCase());
+
+    if (suggestedFix && quote && isIdentical) {
       rejectionReasons.push(`Suggested fix is identical to the flagged text ("${quote}")`);
     }
 
@@ -406,7 +564,8 @@ export function validateFindings(draftText, rawFindings, rules = [], facts = [])
     rejected,
     merged: mergedList,
     stats: {
-      total_from_ai: rawFindings.length,
+      total_from_ai: Array.isArray(rawFindings) ? rawFindings.length : 0,
+      total_checked: combinedRawFindings.length,
       kept: deduplicated.length,
       dropped: rejected.length,
       merged: mergedCount,

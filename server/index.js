@@ -337,11 +337,8 @@ app.post(["/api/review", "/review"], async (req, res) => {
         modelUsed = reviewResult.model || ACTIVE_MODEL;
       }
     } catch (aiErr) {
-      console.error("[Review AI Error]:", aiErr.message);
-      return res.status(503).json({
-        error: "The AI is busy, please try again in a minute.",
-        details: aiErr.message
-      });
+      console.warn("[Review AI Warning]: Gemini review unavailable, continuing with deterministic checks:", aiErr.message);
+      rawAiFindings = [];
     }
 
     // 3. Run the deterministic Validator
@@ -924,8 +921,12 @@ app.get("*", (req, res, next) => {
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`[BrandGuard Server] Running on http://localhost:${PORT}`);
-  console.log(`[BrandGuard Server] Gemini API Key configured: ${Boolean(GEMINI_API_KEY)}`);
-  console.log(`[BrandGuard Server] Active Model: ${ACTIVE_MODEL}`);
-});
+export { app };
+
+if (process.env.NODE_ENV !== "test") {
+  app.listen(PORT, () => {
+    console.log(`[BrandGuard Server] Running on http://localhost:${PORT}`);
+    console.log(`[BrandGuard Server] Gemini API Key configured: ${Boolean(GEMINI_API_KEY)}`);
+    console.log(`[BrandGuard Server] Active Model: ${ACTIVE_MODEL}`);
+  });
+}
