@@ -129,6 +129,7 @@ export default function App() {
   const [analyzingFilename, setAnalyzingFilename] = useState(null);
   const currentVisualReqIdRef = useRef(0);
   const currentVisualAbortControllerRef = useRef(null);
+  const lastVisualAuditRef = useRef(null);
   const [auditStages, setAuditStages] = useState({
     upload: false,
     resize: false,
@@ -344,6 +345,7 @@ export default function App() {
     const reqId = ++currentVisualReqIdRef.current;
 
     const displayFilename = filename || title || "banner";
+    lastVisualAuditRef.current = { base64Image, title, channel, filename: displayFilename };
 
     // 2. Immediately clear previous visual state
     setActiveDraft(null);
@@ -442,6 +444,25 @@ export default function App() {
       if (reqId === currentVisualReqIdRef.current) {
         setIsVisualAuditing(false);
       }
+    }
+  };
+
+  const handleRetryVisualAudit = () => {
+    if (lastVisualAuditRef.current) {
+      const { base64Image, title, channel, filename } = lastVisualAuditRef.current;
+      handleRunVisualAudit(base64Image, title, channel, filename);
+    } else if (activeDraft?.imageUrl) {
+      fetch(activeDraft.imageUrl)
+        .then(r => r.blob())
+        .then(blob => {
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const b64 = reader.result.split(",")[1];
+            handleRunVisualAudit(b64, activeDraft.title || "Visual Banner Audit", activeDraft.channel || "Social / Banner", "banner");
+          };
+          reader.readAsDataURL(blob);
+        })
+        .catch(console.error);
     }
   };
 
@@ -1095,6 +1116,27 @@ export default function App() {
     const offColors = paletteCheck?.dominantOffColors || paletteCheck?.top_off_palette_hex || [];
     const onPct = paletteCheck?.on_palette_percentage ?? paletteCheck?.onPalettePercentage ?? 0;
 
+    const isDraftOcrFailed = Boolean(
+      draft?.isVisual && (
+        draft?.ocrFailed ||
+        draft?.ocr_failed ||
+        draft?.originalText === "Text extraction failed. Please try again" ||
+        draft?.originalText === "Text could not be read, please retry" ||
+        draft?.extractedText === "Text extraction failed. Please try again" ||
+        draft?.extractedText === "Text could not be read, please retry"
+      )
+    );
+
+    const isDraftZeroLines = Boolean(
+      draft?.isVisual && !isDraftOcrFailed && (
+        draft?.hasZeroLines ||
+        draft?.has_zero_lines ||
+        draft?.originalText === "No text found in this image" ||
+        draft?.extractedText === "No text found in this image" ||
+        (Array.isArray(draft?.regions) && draft.regions.length === 0 && (!draft?.originalText || draft?.originalText.trim() === ""))
+      )
+    );
+
     return (
       <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs p-4 sm:p-5 space-y-4">
         <div className="flex items-center justify-between pb-2 border-b border-slate-100">
@@ -1171,8 +1213,12 @@ export default function App() {
             </span>
           </div>
 
-          {(!Array.isArray(draft.regions) || draft.regions.length === 0) ? (
-            <p className="text-xs text-slate-400 italic">No text regions detected in image.</p>
+          {isDraftOcrFailed ? (
+            <p className="text-xs text-slate-400 italic">Contrast not checked</p>
+          ) : (!Array.isArray(draft.regions) || draft.regions.length === 0) ? (
+            <p className="text-xs text-slate-400 italic">
+              {isDraftZeroLines ? "No text found in this image" : "No text regions detected in image."}
+            </p>
           ) : (
             <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
               {draft.regions.map((reg, idx) => {
@@ -1402,6 +1448,27 @@ export default function App() {
       />
     );
   }
+
+  const isOcrFailed = Boolean(
+    activeDraft?.isVisual && (
+      activeDraft?.ocrFailed ||
+      activeDraft?.ocr_failed ||
+      activeDraft?.originalText === "Text extraction failed. Please try again" ||
+      activeDraft?.originalText === "Text could not be read, please retry" ||
+      activeDraft?.extractedText === "Text extraction failed. Please try again" ||
+      activeDraft?.extractedText === "Text could not be read, please retry"
+    )
+  );
+
+  const hasZeroLines = Boolean(
+    activeDraft?.isVisual && !isOcrFailed && (
+      activeDraft?.hasZeroLines ||
+      activeDraft?.has_zero_lines ||
+      activeDraft?.originalText === "No text found in this image" ||
+      activeDraft?.extractedText === "No text found in this image" ||
+      (Array.isArray(activeDraft?.regions) && activeDraft.regions.length === 0 && (!activeDraft?.originalText || activeDraft?.originalText.trim() === ""))
+    )
+  );
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col font-sans antialiased">
@@ -2277,7 +2344,7 @@ export default function App() {
                         <RefreshCw className="w-4 h-4 text-blue-600 animate-spin shrink-0" />
                         <div>
                           <p className="text-xs font-bold text-slate-800">Analysing {analyzingFilename || "banner"}...</p>
-                          <p className="text-[11px] text-slate-500">Real-time pipeline analysis in progress</p>
+                          <p className="text-[11px] text-slate-500">AI analysis can take up to a minute.</p>
                         </div>
                       </div>
                       <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 font-mono">
@@ -2339,9 +2406,14 @@ export default function App() {
                   <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                     <div className="flex items-center gap-2">
                       <RefreshCw className="w-4 h-4 text-blue-600 animate-spin" />
-                      <h3 className="font-bold text-slate-800 text-sm">
-                        Analysing {analyzingFilename || "banner"}...
-                      </h3>
+                      <div>
+                        <h3 className="font-bold text-slate-800 text-sm">
+                          Analysing {analyzingFilename || "banner"}...
+                        </h3>
+                        <p className="text-xs text-slate-500 mt-0.5">
+                          AI analysis can take up to a minute.
+                        </p>
+                      </div>
                     </div>
                     <span className="text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-blue-100 text-blue-700 font-mono">
                       Analysing...
@@ -2496,7 +2568,25 @@ export default function App() {
                               </span>
                             )}
                           </div>
-                          {renderHighlightedText(activeDraft.originalText || activeDraft.extractedText, activeDraft.findings)}
+                          {isOcrFailed ? (
+                            <div className="flex items-center justify-between py-1 bg-red-50/70 p-2.5 rounded-lg border border-red-200">
+                              <span className="text-xs font-semibold text-red-700 flex items-center gap-1.5">
+                                <AlertTriangle className="w-4 h-4 shrink-0 text-red-500" />
+                                Text extraction failed. Please try again
+                              </span>
+                              <button
+                                type="button"
+                                onClick={handleRetryVisualAudit}
+                                className="px-2.5 py-1 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-bold flex items-center gap-1 shadow-2xs transition-all"
+                              >
+                                <RefreshCw className="w-3 h-3" /> Retry
+                              </button>
+                            </div>
+                          ) : hasZeroLines ? (
+                            <p className="text-xs text-slate-500 italic py-1">No text found in this image</p>
+                          ) : (
+                            renderHighlightedText(activeDraft.originalText || activeDraft.extractedText, activeDraft.findings)
+                          )}
                         </div>
 
                         {/* Editable Alt-Text Box (Rule V-03) */}
@@ -2717,12 +2807,39 @@ export default function App() {
                     <span className="text-xs text-slate-500">Click card to highlight</span>
                   </div>
 
-                  {(!activeDraft.findings || activeDraft.findings.length === 0) && (
+                  {(!activeDraft.findings || activeDraft.findings.length === 0) && !isOcrFailed && !hasZeroLines && (
                     <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center">
                       <CheckCircle2 className="w-10 h-10 text-emerald-500 mx-auto mb-2" />
                       <h4 className="font-bold text-slate-800 text-sm">No Compliance Issues Detected</h4>
                       <p className="text-xs text-slate-500 mt-1">
                         Draft complies with all active brand guidelines, visual rules, and verified facts.
+                      </p>
+                    </div>
+                  )}
+
+                  {isOcrFailed && (!activeDraft.findings || activeDraft.findings.length === 0) && (
+                    <div className="bg-white rounded-2xl border border-red-200 bg-red-50/30 p-8 text-center">
+                      <AlertTriangle className="w-10 h-10 text-red-500 mx-auto mb-2" />
+                      <h4 className="font-bold text-slate-800 text-sm">Text extraction failed. Please try again</h4>
+                      <p className="text-xs text-slate-500 mt-1 mb-3">
+                        OCR could not extract text from this image.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={handleRetryVisualAudit}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-bold shadow-2xs transition-all"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" /> Retry
+                      </button>
+                    </div>
+                  )}
+
+                  {hasZeroLines && (!activeDraft.findings || activeDraft.findings.length === 0) && (
+                    <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center">
+                      <FileText className="w-10 h-10 text-slate-400 mx-auto mb-2" />
+                      <h4 className="font-bold text-slate-800 text-sm">No text found in this image</h4>
+                      <p className="text-xs text-slate-500 mt-1">
+                        No visible text elements were detected in this banner.
                       </p>
                     </div>
                   )}
@@ -3101,9 +3218,27 @@ export default function App() {
                                 </span>
                               )}
                             </div>
-                            <p className="text-xs font-mono text-slate-800 leading-relaxed whitespace-pre-wrap">
-                              {activeDraft.originalText || activeDraft.extractedText}
-                            </p>
+                            {isOcrFailed ? (
+                              <div className="flex items-center justify-between py-1 bg-red-50/70 p-2.5 rounded-lg border border-red-200">
+                                <span className="text-xs font-semibold text-red-700 flex items-center gap-1.5">
+                                  <AlertTriangle className="w-4 h-4 shrink-0 text-red-500" />
+                                  Text extraction failed. Please try again
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={handleRetryVisualAudit}
+                                  className="px-2.5 py-1 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-bold flex items-center gap-1 shadow-2xs transition-all"
+                                >
+                                  <RefreshCw className="w-3 h-3" /> Retry
+                                </button>
+                              </div>
+                            ) : hasZeroLines ? (
+                              <p className="text-xs text-slate-500 italic py-1">No text found in this image</p>
+                            ) : (
+                              <p className="text-xs font-mono text-slate-800 leading-relaxed whitespace-pre-wrap">
+                                {activeDraft.originalText || activeDraft.extractedText}
+                              </p>
+                            )}
                           </div>
 
                           <div className="p-3 bg-blue-50/50 border border-blue-200 rounded-xl">

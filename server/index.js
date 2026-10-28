@@ -521,6 +521,8 @@ app.post(["/api/visual-review", "/visual-review"], async (req, res) => {
       currentText: auditResult.extracted_text,
       altText: auditResult.alt_text,
       hasLogo: auditResult.has_logo,
+      ocrFailed: Boolean(auditResult.ocr_failed),
+      hasZeroLines: Boolean(auditResult.has_zero_lines),
       version: 1,
       findings: auditResult.findings,
       validatorRejected: auditResult.validatorRejected || [],

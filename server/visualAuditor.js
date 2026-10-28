@@ -389,8 +389,12 @@ export const PLACEHOLDER_STRINGS = new Set([
 export function validateOcrResult(visionData) {
   if (!visionData) return false;
   const regions = visionData.text_regions || visionData.lines || [];
-  if (!Array.isArray(regions) || regions.length === 0) {
+  if (!Array.isArray(regions)) {
     return false;
+  }
+  // Zero lines is valid (OCR succeeded with zero lines found in the image)
+  if (regions.length === 0) {
+    return true;
   }
 
   const lines = [];
@@ -409,7 +413,8 @@ export function validateOcrResult(visionData) {
     lines.push(text);
   }
 
-  if (lines.length === 0) {
+  // If regions had elements but all of them were empty or placeholders
+  if (lines.length === 0 && regions.length > 0) {
     return false;
   }
 
@@ -560,7 +565,12 @@ export async function runVisualAudit({
     const hasPlaceholders = (cached.regions || []).some(r =>
       PLACEHOLDER_STRINGS.has((r.text || "").trim().toLowerCase())
     );
-    if (cachedText === "Text could not be read, please retry" || hasPlaceholders) {
+    if (
+      cached.ocr_failed ||
+      cachedText === "Text extraction failed. Please try again" ||
+      cachedText === "Text could not be read, please retry" ||
+      hasPlaceholders
+    ) {
       visualAuditCache.delete(cacheKey);
     } else {
       cached.timings_ms = {
@@ -722,13 +732,13 @@ export async function runVisualAudit({
     if (!isValid || !visionData) {
       console.warn("[Visual OCR] OCR failed after retry. Marking as unreadable.");
       visionData = {
-        extracted_text: "Text could not be read, please retry",
+        extracted_text: "Text extraction failed. Please try again",
         text_regions: [],
         alt_text: "",
         has_logo: false,
         ocr_failed: true
       };
-      if (onStage) onStage("gemini_ocr", "OCR text could not be read (retried)", dur);
+      if (onStage) onStage("gemini_ocr", "Text extraction failed (retried)", dur);
     } else {
       if (onStage) onStage("gemini_ocr", "Gemini Vision OCR completed", dur);
     }
@@ -828,12 +838,21 @@ export async function runVisualAudit({
   const paletteSummary = paletteOutcome.paletteSummary;
   const paletteTime = paletteOutcome.dur;
 
-  const isOcrFailed = Boolean(visionData.ocr_failed || visionData.extracted_text === "Text could not be read, please retry");
-  const extractedText = isOcrFailed ? "Text could not be read, please retry" : (visionData.extracted_text || visionData.text || "").trim();
+  const isOcrFailed = Boolean(
+    visionData.ocr_failed ||
+    visionData.extracted_text === "Text extraction failed. Please try again" ||
+    visionData.extracted_text === "Text could not be read, please retry"
+  );
   const textRegions = isOcrFailed ? [] : (Array.isArray(visionData.text_regions || visionData.boxes)
     ? (visionData.text_regions || visionData.boxes)
     : []);
-  let altText = isOcrFailed ? "" : generateBannerAltText(textRegions, isOcrFailed);
+  const hasZeroLines = !isOcrFailed && textRegions.length === 0;
+
+  const extractedText = isOcrFailed
+    ? "Text extraction failed. Please try again"
+    : (hasZeroLines ? "No text found in this image" : (visionData.extracted_text || visionData.text || "").trim());
+
+  let altText = isOcrFailed || hasZeroLines ? "" : generateBannerAltText(textRegions, isOcrFailed);
   const hasLogo = isOcrFailed ? false : Boolean(visionData.has_logo || visionData.logo || /CampusPro/i.test(extractedText));
 
   const allFindings = [];
@@ -1316,6 +1335,8 @@ export async function runVisualAudit({
       regions: textRegions,
       alt_text: altText,
       has_logo: hasLogo,
+      ocr_failed: isOcrFailed,
+      has_zero_lines: hasZeroLines,
       findings: finalFindings,
       contrast_results: contrastResults,
       palette_summary: paletteSummary,
@@ -1331,7 +1352,7 @@ export async function runVisualAudit({
     };
 
     // Cache in-memory by SHA-256 only if OCR succeeded
-    if (!isOcrFailed && extractedText !== "Text could not be read, please retry") {
+    if (!isOcrFailed && extractedText !== "Text extraction failed. Please try again" && extractedText !== "Text could not be read, please retry") {
       visualAuditCache.set(cacheKey, finalResult);
     }
 
@@ -1362,6 +1383,8 @@ export async function runVisualAudit({
     regions: textRegions,
     alt_text: altText,
     has_logo: hasLogo,
+    ocr_failed: isOcrFailed,
+    has_zero_lines: hasZeroLines,
     findings: mergedFindings,
     contrast_results: contrastResults,
     palette_summary: paletteSummary,
@@ -1376,7 +1399,7 @@ export async function runVisualAudit({
     timings_ms
   };
 
-  if (!isOcrFailed && extractedText !== "Text could not be read, please retry") {
+  if (!isOcrFailed && extractedText !== "Text extraction failed. Please try again" && extractedText !== "Text could not be read, please retry") {
     visualAuditCache.set(cacheKey, finalResult);
   }
   return finalResult;
