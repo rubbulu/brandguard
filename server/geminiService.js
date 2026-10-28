@@ -10,7 +10,7 @@ STRICT RULES:
 2. For every finding, copy the EXACT text from the draft into "quote". Do not paraphrase it.
    - For claim violations (such as R-15 guarantees, R-12 superlatives), the flagged text ("quote") must cover the WHOLE claim phrase or clause being corrected (e.g. for "Guaranteed 100% better grades!", the quote must be the complete phrase "Guaranteed 100% better grades", NOT just "Guaranteed 100%"). Do not include trailing excess punctuation (like "!!!") in claim quotes; excess exclamation marks are covered separately under T-03.
    - If a phrase violates both R-15 and R-12 (e.g. "Guaranteed 100% best laptop"), return a finding for R-15 and a finding for R-12, both quoting "Guaranteed 100% best laptop" and suggesting "Designed to be a great laptop".
-   - For T-03 (excess exclamation marks): Flag the run of exclamation marks (e.g. "!!!") and suggest reducing it to a single "!".
+   - For T-03 (excess exclamation marks): Flag T-03 ONLY if there are 2 or more consecutive or total "!" in the draft (e.g. flag the run "!!!" and suggest reducing it to "!"). If the draft has only 0 or 1 "!", do NOT flag T-03.
    - For T-05 (all-caps): Only flag words that are FULLY uppercase of 2+ letters (e.g. "BUY", "NOW"). Do NOT flag Title Case words (e.g. "Guaranteed" is NOT all-caps).
 3. "rule_id" must be one of the IDs I provided (rules start with R- or T-, facts with F-).
 4. For "suggested_fix":
@@ -72,7 +72,7 @@ ${draftText}
 IMPORTANT INSTRUCTIONS:
 - Flag all applicable rules that are violated. If a phrase breaks multiple rules (such as R-15 for "Guaranteed 100%" and R-12 for superlative "best" in "Guaranteed 100% best laptop"), flag both R-15 and R-12 for the phrase "Guaranteed 100% best laptop" with suggested_fix "Designed to be a great laptop".
 - For claim violations (such as R-15 guarantees, R-12 superlatives), the flagged "quote" must cover the entire claim phrase (e.g. "Guaranteed 100% better grades", not just "Guaranteed 100%"). Do not include trailing excess punctuation (like "!!!") in claim quotes.
-- For T-03 (excess exclamation marks): flag the run of "!" (e.g. "!!!") and suggest reducing it to "!".
+- For T-03 (excess exclamation marks): only flag T-03 if there are 2 or more consecutive or total "!" in the draft. If the draft has only 1 "!" (such as "BUY NOW before it SELLS OUT!"), do NOT flag T-03.
 - For T-05 (all-caps): only flag words that are fully uppercase (e.g. "BUY", "NOW"). Do not flag Title Case words (e.g. "Guaranteed").
 - For F-01 (battery claims): suggest "Battery lasts up to 12 hours." Do not add "reliable performance" or other new claims not in the fact. "Battery lasts up to 12 hours." is safer.
 - The "suggested_fix" must be a complete, grammatical replacement for that whole phrase, so the final text reads naturally with no ungrammatical leftovers.`;

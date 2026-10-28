@@ -435,7 +435,7 @@ export function runDeterministicToneChecks(draftText, rules = [], brandNames = [
   // --- T-03: Friendly tone. At most one exclamation mark per post ---
   if (hasT03) {
     const totalExMarks = (draftText.match(/!/g) || []).length;
-    if (totalExMarks > 1) {
+    if (totalExMarks >= 2) {
       const runMatches = draftText.match(/!{2,}/g);
       if (runMatches && runMatches.length > 0) {
         const uniqueRuns = Array.from(new Set(runMatches));
@@ -561,14 +561,33 @@ export function validateFindings(draftText, rawFindings, rules = [], facts = [])
       }
     }
 
-    // T-03 & claim punctuation normalization when draft has runs of exclamation marks
+    // T-03 check: Rule T-03 (more than one exclamation mark) must be decided by code, not the model.
+    // Count "!" characters in the draft text.
+    // Flag T-03 only if there are 2 or more consecutive or total "!" in the draft.
+    // If the model returns T-03 when the count is less than 2, drop it.
+    const totalExMarks = (draftText.match(/!/g) || []).length;
     const hasRunOfExMarks = Boolean(draftText.match(/!{2,}/));
-    if (ruleId === "T-03" && hasRunOfExMarks) {
-      const runMatch = draftText.match(/!{2,}/);
-      quote = runMatch ? runMatch[0] : quote;
-      suggestedFix = "!";
-      finding.action = "replace";
-      finding.needs_human_judgement = false;
+
+    if (ruleId === "T-03") {
+      if (totalExMarks < 2) {
+        rejectionReasons.push(`Draft text has fewer than 2 exclamation marks (${totalExMarks} found). Rule T-03 only applies when there are 2 or more exclamation marks.`);
+      } else if (hasRunOfExMarks) {
+        // Highlight exactly the run of exclamation marks
+        const runMatch = quote.match(/!{2,}/) || draftText.match(/!{2,}/);
+        quote = runMatch ? runMatch[0] : quote;
+        suggestedFix = "!";
+        finding.action = "replace";
+        finding.needs_human_judgement = false;
+      } else {
+        // For scattered exclamation marks, ensure quote highlights the sentence with excess '!'
+        const excessFinding = deterministicToneFindings.find(df => df.rule_id === "T-03");
+        if (excessFinding) {
+          quote = excessFinding.quote;
+          suggestedFix = excessFinding.suggested_fix;
+          finding.action = "replace";
+          finding.needs_human_judgement = false;
+        }
+      }
     } else if (hasRunOfExMarks && (ruleId.startsWith("R-") || ruleId.startsWith("F-") || ruleId.includes("+"))) {
       if (/!{2,}$/.test(quote)) {
         quote = quote.replace(/!{2,}$/, "").trim();
