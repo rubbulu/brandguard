@@ -189,6 +189,38 @@ function extendRegionToTextExtent(region, rawImageBuffer, imgWidth, imgHeight, b
 }
 
 // --- Gemini Vision Output Parser (handles arrays, box_2d, objects, and normalized coordinates) ---
+export function formatAutoAltText(rawText, maxLen = 125) {
+  if (!rawText || typeof rawText !== "string") {
+    return "Marketing banner image.";
+  }
+
+  // 1. Normalize whitespace
+  let text = rawText.replace(/\s+/g, " ").trim();
+
+  // 2. Skip single-letter text such as a logo mark (e.g. stray "C")
+  text = text.replace(/^(Marketing banner:\s*)?[A-Za-z]\s+(?=[A-Z])/i, (match, prefix) => {
+    return prefix || "";
+  });
+
+  text = text.replace(/(^|[.!?:]\s+)[A-Za-z]\s+(?=[A-Z])/g, "$1");
+  text = text.replace(/\s+/g, " ").trim();
+
+  // 3. If within maxLen, return as is
+  if (text.length <= maxLen) {
+    return text;
+  }
+
+  // 4. Shorten at a word boundary within maxLen
+  const sub = text.slice(0, maxLen);
+  const lastSpace = sub.lastIndexOf(" ");
+  let shortened = (lastSpace > 0) ? sub.slice(0, lastSpace) : sub;
+
+  // 5. Clean trailing punctuation at word boundary
+  shortened = shortened.replace(/[\s,;:–—\-\\\/]+$/, "").trim();
+
+  return shortened;
+}
+
 function parseVisionOutput(rawText) {
   let parsed = null;
   try {
@@ -204,12 +236,18 @@ function parseVisionOutput(rawText) {
 
   let extracted_text = "";
   const text_regions = [];
+  const nonLogoTexts = [];
 
   if (Array.isArray(parsed)) {
     const texts = [];
     for (const item of parsed) {
       if (!item || !item.text) continue;
+      const t = item.text.trim();
       texts.push(item.text);
+      // Skip single-letter text such as a logo mark (e.g. "C")
+      if (t.length > 1 || !/^[A-Za-z]$/.test(t)) {
+        nonLogoTexts.push(t);
+      }
       let x = 0.05, y = 0.05, w = 0.8, h = 0.08;
       const b2d = item.box_2d || (Array.isArray(item.boxes) && item.boxes[0]) || item.box;
       if (Array.isArray(b2d) && b2d.length === 4) {
@@ -237,6 +275,10 @@ function parseVisionOutput(rawText) {
     const rawRegions = parsed.text_regions || parsed.boxes || [];
     for (const r of rawRegions) {
       if (!r || !r.text) continue;
+      const t = r.text.trim();
+      if (t.length > 1 || !/^[A-Za-z]$/.test(t)) {
+        nonLogoTexts.push(t);
+      }
       let x = 0.05, y = 0.05, w = 0.8, h = 0.08;
       const b2d = r.box_2d || (Array.isArray(r.boxes) && r.boxes[0]) || r.box;
       if (Array.isArray(b2d) && b2d.length === 4) {
@@ -260,7 +302,12 @@ function parseVisionOutput(rawText) {
     }
   }
 
-  const alt_text = parsed?.alt_text || parsed?.alt || (extracted_text ? `Marketing banner: ${extracted_text.replace(/\s+/g, " ").slice(0, 100)}` : "Marketing banner image.");
+  const baseForAlt = nonLogoTexts.length > 0
+    ? nonLogoTexts.join(" ")
+    : extracted_text.split(/\n+/).filter(line => line.trim().length > 1 || !/^[A-Za-z]$/.test(line.trim())).join(" ");
+
+  const rawAlt = parsed?.alt_text || parsed?.alt || (baseForAlt ? `Marketing banner: ${baseForAlt}` : "Marketing banner image.");
+  const alt_text = formatAutoAltText(rawAlt, 125);
   const has_logo = Boolean(parsed?.has_logo || parsed?.logo || /CampusPro/i.test(extracted_text));
 
   return { extracted_text, text_regions, alt_text, has_logo };
@@ -548,7 +595,7 @@ export async function runVisualAudit({
   const textRegions = Array.isArray(visionData.text_regions || visionData.boxes)
     ? (visionData.text_regions || visionData.boxes)
     : [];
-  let altText = (visionData.alt_text || visionData.alt || "").trim().slice(0, 125);
+  let altText = formatAutoAltText(visionData.alt_text || visionData.alt || extractedText, 125);
   const hasLogo = Boolean(visionData.has_logo || visionData.logo || visionData.campuspro_logo_detected);
 
   const allFindings = [];
