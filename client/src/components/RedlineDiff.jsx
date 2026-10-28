@@ -3,28 +3,166 @@ import { diffWordsWithSpace } from "diff";
 import { Columns, AlignLeft, Info, CheckCircle2 } from "lucide-react";
 
 /**
- * Associates diff changes with causing Rule IDs from findings
+ * Visual-only or security rule IDs that must never be tagged on text redline diffs.
  */
-function matchRuleIdForChunk(chunkValue, isRemoved, findings = []) {
-  if (!chunkValue || typeof chunkValue !== "string" || !chunkValue.trim()) return null;
-  const cleanChunk = chunkValue.trim().toLowerCase();
-  if (!Array.isArray(findings)) return null;
+function isVisualOrSecRule(ruleId) {
+  if (!ruleId || typeof ruleId !== "string") return true;
+  const upper = ruleId.trim().toUpperCase();
+  if (upper.startsWith("V-") || upper.startsWith("SEC-") || upper === "SEC-01") return true;
+  return ["V-01", "V-02", "V-03", "V-04", "SEC-01"].includes(upper);
+}
 
-  for (const f of findings) {
-    if (!f || !f.rule_id) continue;
-    if (isRemoved) {
-      const q = typeof f.quote === "string" ? f.quote.trim().toLowerCase() : "";
-      if (q && !q.startsWith("(") && (q.includes(cleanChunk) || cleanChunk.includes(q))) {
-        return f.rule_id;
+/**
+ * Normalizes leading and trailing whitespace from a change block
+ * so that common whitespace is preserved in the baseline flow
+ * rather than wrapped inside struck-through or inserted badges.
+ */
+function normalizeChangeBlock(change) {
+  let rem = change.removed || "";
+  let add = change.added || "";
+  let leadSpace = "";
+  let trailSpace = "";
+
+  const leadMatch = rem.match(/^\s+/) && add.match(/^\s+/);
+  if (leadMatch) {
+    const commonLead = rem.match(/^\s+/)[0].length <= add.match(/^\s+/)[0].length
+      ? rem.match(/^\s+/)[0]
+      : add.match(/^\s+/)[0];
+    leadSpace = commonLead;
+    rem = rem.slice(commonLead.length);
+    add = add.slice(commonLead.length);
+  }
+
+  const remTrail = rem.match(/\s+$/);
+  const addTrail = add.match(/\s+$/);
+  if (remTrail && addTrail) {
+    const commonTrail = remTrail[0].length <= addTrail[0].length ? remTrail[0] : addTrail[0];
+    trailSpace = commonTrail;
+    rem = rem.slice(0, rem.length - commonTrail.length);
+    add = add.slice(0, add.length - commonTrail.length);
+  }
+
+  return { leadSpace, rem, add, trailSpace };
+}
+
+/**
+ * Merges consecutive or whitespace-interleaved diff tokens into
+ * single whole phrase changes instead of word-by-word interleaving.
+ */
+function mergeDiffChunks(rawChunks) {
+  const blocks = [];
+  let currentChange = null;
+
+  for (let i = 0; i < rawChunks.length; i++) {
+    const chunk = rawChunks[i];
+    if (chunk.added || chunk.removed) {
+      if (!currentChange) {
+        currentChange = { removed: "", added: "" };
       }
+      if (chunk.removed) currentChange.removed += chunk.value;
+      if (chunk.added) currentChange.added += chunk.value;
     } else {
-      const fix = typeof f.suggested_fix === "string" ? f.suggested_fix.trim().toLowerCase() : "";
-      if (fix && (fix.includes(cleanChunk) || cleanChunk.includes(fix))) {
-        return f.rule_id;
+      const isWhitespace = /^\s+$/.test(chunk.value);
+      const nextIsChange = i + 1 < rawChunks.length && (rawChunks[i + 1].added || rawChunks[i + 1].removed);
+
+      if (currentChange && isWhitespace && nextIsChange) {
+        currentChange.removed += chunk.value;
+        currentChange.added += chunk.value;
+      } else {
+        if (currentChange) {
+          blocks.push(currentChange);
+          currentChange = null;
+        }
+        blocks.push({ value: chunk.value });
       }
     }
   }
+
+  if (currentChange) {
+    blocks.push(currentChange);
+  }
+
+  return blocks;
+}
+
+/**
+ * Tags a changed block only with the rule ID of the accepted fix that caused it (e.g. R-12 or F-01).
+ * Never tags text changes with visual-only rule IDs (V-01, V-02, V-03, SEC-01).
+ */
+function matchRuleForBlock(remText, addText, findings = []) {
+  const accepted = (Array.isArray(findings) ? findings : []).filter(
+    f => f && (f.status === "accepted" || f.status === "edited") && !isVisualOrSecRule(f.rule_id)
+  );
+
+  const cleanRem = (remText || "").trim().toLowerCase();
+  const cleanAdd = (addText || "").trim().toLowerCase();
+
+  // 1. Exact match on quote or suggested_fix
+  for (const f of accepted) {
+    const q = typeof f.quote === "string" ? f.quote.trim().toLowerCase() : "";
+    const fix = typeof f.suggested_fix === "string" ? f.suggested_fix.trim().toLowerCase() : "";
+
+    if (q && cleanRem && q === cleanRem) return f.rule_id;
+    if (fix && cleanAdd && fix === cleanAdd) return f.rule_id;
+  }
+
+  // 2. Substring containment match
+  for (const f of accepted) {
+    const q = typeof f.quote === "string" ? f.quote.trim().toLowerCase() : "";
+    const fix = typeof f.suggested_fix === "string" ? f.suggested_fix.trim().toLowerCase() : "";
+
+    if (q && cleanRem && (cleanRem.includes(q) || q.includes(cleanRem))) return f.rule_id;
+    if (fix && cleanAdd && (cleanAdd.includes(fix) || fix.includes(cleanAdd))) return f.rule_id;
+  }
+
   return null;
+}
+
+/**
+ * Computes phrase-level redline diff chunks between originalText and finalText.
+ */
+function computeRedlineChunks(originalText, finalText, findings) {
+  const orig = typeof originalText === "string" ? originalText : String(originalText || "");
+  const fin = typeof finalText === "string" ? finalText : String(finalText || "");
+
+  if (!orig && !fin) return [];
+  if (orig === fin) return [{ value: orig }];
+
+  const rawChunks = diffWordsWithSpace(orig, fin);
+  const mergedBlocks = mergeDiffChunks(rawChunks);
+
+  const result = [];
+  for (const block of mergedBlocks) {
+    if (block.removed !== undefined || block.added !== undefined) {
+      const norm = normalizeChangeBlock(block);
+      if (norm.leadSpace) {
+        if (result.length > 0 && !result[result.length - 1].added && !result[result.length - 1].removed) {
+          result[result.length - 1].value += norm.leadSpace;
+        } else {
+          result.push({ value: norm.leadSpace });
+        }
+      }
+
+      const ruleId = matchRuleForBlock(norm.rem, norm.add, findings);
+      if (norm.rem) {
+        result.push({ removed: true, value: norm.rem, ruleId });
+      }
+      if (norm.add) {
+        result.push({ added: true, value: norm.add, ruleId });
+      }
+
+      if (norm.trailSpace) {
+        result.push({ value: norm.trailSpace });
+      }
+    } else {
+      if (result.length > 0 && !result[result.length - 1].added && !result[result.length - 1].removed) {
+        result[result.length - 1].value += block.value;
+      } else {
+        result.push(block);
+      }
+    }
+  }
+  return result;
 }
 
 export default function RedlineDiff({
@@ -40,19 +178,7 @@ export default function RedlineDiff({
 
   const diffChunks = useMemo(() => {
     try {
-      const orig = typeof originalText === "string" ? originalText : String(originalText || "");
-      const fin = typeof finalText === "string" ? finalText : String(finalText || "");
-      if (!orig && !fin) return [];
-      const chunks = diffWordsWithSpace(orig, fin);
-      const safeFindings = Array.isArray(findings) ? findings : [];
-      return chunks.map(chunk => {
-        const ruleId = chunk.removed
-          ? matchRuleIdForChunk(chunk.value, true, safeFindings)
-          : chunk.added
-          ? matchRuleIdForChunk(chunk.value, false, safeFindings)
-          : null;
-        return { ...chunk, ruleId };
-      });
+      return computeRedlineChunks(originalText, finalText, findings);
     } catch (err) {
       console.warn("[RedlineDiff Computation Warning]:", err);
       return [];
