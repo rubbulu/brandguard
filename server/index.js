@@ -614,12 +614,23 @@ app.patch("/api/drafts/:id/alt-text", (req, res) => {
   res.json({ draft });
 });
 
+// Helper: Check if a rule ID is a copy rule (R-, F-, T-)
+export function isCopyRule(ruleId) {
+  if (!ruleId || typeof ruleId !== "string") return false;
+  const upper = ruleId.trim().toUpperCase();
+  // Design fixes (V-01, V-02, etc.) are instructions for a designer, not copy changes.
+  // Only copy fixes (R-, F-, T-) change the text.
+  return upper.startsWith("R-") || upper.startsWith("F-") || upper.startsWith("T-");
+}
+
 // Helper: Recompute currentText from originalText and active accepted/edited findings
-function recomputeDraftText(originalText, findings) {
-  let text = originalText;
+// Design fixes (V-01, V-02) stay as design notes and never change text copy.
+// Only copy fixes (R-, F-, T-) change the text.
+export function recomputeDraftText(originalText, findings = []) {
+  let text = originalText || "";
   for (const f of findings) {
-    if (f.status === "accepted" || f.status === "edited") {
-      if (f.rule_id === "SEC-01" || f.action === "remove") {
+    if ((f.status === "accepted" || f.status === "edited") && isCopyRule(f.rule_id)) {
+      if (f.action === "remove") {
         if (text && text.includes(f.quote)) {
           text = text.replace(f.quote, "").trim();
         }
@@ -665,21 +676,27 @@ app.patch("/api/drafts/:id/finding", (req, res) => {
     }
     finding.status = "accepted";
     draft.currentText = recomputeDraftText(draft.originalText, draft.findings);
+    const isCopy = isCopyRule(finding.rule_id);
     draft.history.push({
       id: `h-${Date.now()}`,
       timestamp: new Date().toISOString(),
       actor: "Creator",
-      action: `Accepted suggested fix for ${finding.rule_id}: replaced "${finding.quote}" with "${finding.suggested_fix}"`
+      action: isCopy
+        ? `Accepted suggested fix for ${finding.rule_id}: replaced "${finding.quote}" with "${finding.suggested_fix}"`
+        : `Accepted design note for ${finding.rule_id}: "${finding.suggested_fix}"`
     });
   } else if (action === "edit") {
     finding.status = "edited";
     finding.suggested_fix = (customFix || finding.suggested_fix).trim();
     draft.currentText = recomputeDraftText(draft.originalText, draft.findings);
+    const isCopy = isCopyRule(finding.rule_id);
     draft.history.push({
       id: `h-${Date.now()}`,
       timestamp: new Date().toISOString(),
       actor: "Creator",
-      action: `Edited and applied fix for ${finding.rule_id}: replaced "${finding.quote}" with "${finding.suggested_fix}"`
+      action: isCopy
+        ? `Edited and applied fix for ${finding.rule_id}: replaced "${finding.quote}" with "${finding.suggested_fix}"`
+        : `Edited design note for ${finding.rule_id}: "${finding.suggested_fix}"`
     });
   } else if (action === "reject") {
     finding.status = "rejected";

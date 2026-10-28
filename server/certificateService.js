@@ -31,6 +31,30 @@ export function canonicalizeJson(obj) {
   return "{" + keyVals.join(",") + "}";
 }
 
+function isCopyRule(ruleId) {
+  if (!ruleId || typeof ruleId !== "string") return false;
+  const upper = ruleId.trim().toUpperCase();
+  return upper.startsWith("R-") || upper.startsWith("F-") || upper.startsWith("T-");
+}
+
+function recomputeApprovedCopy(originalText, findings = []) {
+  let text = originalText || "";
+  for (const f of findings) {
+    if ((f.status === "accepted" || f.status === "edited") && isCopyRule(f.rule_id)) {
+      if (f.action === "remove") {
+        if (text && text.includes(f.quote)) {
+          text = text.replace(f.quote, "").trim();
+        }
+      } else if (f.suggested_fix && f.suggested_fix !== "Needs manual edit") {
+        if (text && text.includes(f.quote)) {
+          text = text.replace(f.quote, f.suggested_fix);
+        }
+      }
+    }
+  }
+  return text;
+}
+
 /**
  * Builds canonical compliance certificate for an approved draft
  */
@@ -42,7 +66,13 @@ export function createComplianceCertificate({
 }) {
   const certificateId = `cert_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
   const approvedAt = new Date().toISOString();
-  const finalText = (draft.currentText || draft.originalText || "").trim();
+  // Only copy fixes (R-, F-, T-) change text; design fixes (V-01, V-02) stay as design notes
+  const finalText = (
+    recomputeApprovedCopy(draft.originalText, draft.findings || []) ||
+    draft.currentText ||
+    draft.originalText ||
+    ""
+  ).trim();
   const originalText = (draft.originalText || "").trim();
   const originalTextHash = crypto.createHash("sha256").update(originalText).digest("hex");
 

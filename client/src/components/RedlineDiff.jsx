@@ -1,15 +1,27 @@
 import React, { useState, useMemo } from "react";
-import { diffWordsWithSpace } from "diff";
+import { Diff } from "diff";
 import { Columns, AlignLeft, Info, CheckCircle2 } from "lucide-react";
 
 /**
- * Visual-only or security rule IDs that must never be tagged on text redline diffs.
+ * Custom Diff instance:
+ * Never splits on a full stop between digits (e.g. 14.63).
+ * Treats ratio tokens like "14.63:1" or "4.5:1" as single atomic tokens.
  */
-function isVisualOrSecRule(ruleId) {
-  if (!ruleId || typeof ruleId !== "string") return true;
+const wordsWithSpaceAndDecimalsDiff = new Diff();
+wordsWithSpaceAndDecimalsDiff.tokenize = function(value) {
+  const tokenRegex = /(\r?\n)|\d+(?:\.\d+)+(?::\d+)?|\d+:\d+|[\p{L}\p{N}_]+|[^\S\n\r]+|[^\s]/gu;
+  return value.match(tokenRegex) || [];
+};
+
+/**
+ * Checks if a rule ID is a copy rule (R-, F-, T-).
+ * Design fixes (V-01, V-02, etc.) are instructions for a designer and never tag text changes.
+ * Only copy fixes (R-, F-, T-) change text.
+ */
+function isCopyRule(ruleId) {
+  if (!ruleId || typeof ruleId !== "string") return false;
   const upper = ruleId.trim().toUpperCase();
-  if (upper.startsWith("V-") || upper.startsWith("SEC-") || upper === "SEC-01") return true;
-  return ["V-01", "V-02", "V-03", "V-04", "SEC-01"].includes(upper);
+  return upper.startsWith("R-") || upper.startsWith("F-") || upper.startsWith("T-");
 }
 
 /**
@@ -88,10 +100,11 @@ function mergeDiffChunks(rawChunks) {
 /**
  * Tags a changed block only with the rule ID of the accepted fix that caused it (e.g. R-12 or F-01).
  * Never tags text changes with visual-only rule IDs (V-01, V-02, V-03, SEC-01).
+ * Only copy fixes (R-, F-, T-) change the text.
  */
 function matchRuleForBlock(remText, addText, findings = []) {
   const accepted = (Array.isArray(findings) ? findings : []).filter(
-    f => f && (f.status === "accepted" || f.status === "edited") && !isVisualOrSecRule(f.rule_id)
+    f => f && (f.status === "accepted" || f.status === "edited") && isCopyRule(f.rule_id)
   );
 
   const cleanRem = (remText || "").trim().toLowerCase();
@@ -120,6 +133,7 @@ function matchRuleForBlock(remText, addText, findings = []) {
 
 /**
  * Computes phrase-level redline diff chunks between originalText and finalText.
+ * Never splits on a full stop between digits; treats "14.63:1" as one token.
  */
 function computeRedlineChunks(originalText, finalText, findings) {
   const orig = typeof originalText === "string" ? originalText : String(originalText || "");
@@ -128,7 +142,7 @@ function computeRedlineChunks(originalText, finalText, findings) {
   if (!orig && !fin) return [];
   if (orig === fin) return [{ value: orig }];
 
-  const rawChunks = diffWordsWithSpace(orig, fin);
+  const rawChunks = wordsWithSpaceAndDecimalsDiff.diff(orig, fin);
   const mergedBlocks = mergeDiffChunks(rawChunks);
 
   const result = [];
