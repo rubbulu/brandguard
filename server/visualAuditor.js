@@ -278,11 +278,100 @@ function extractBoundingBox(item, fallbackIdx = 0, total = 1) {
   return { x: 0.08, y, w: 0.75, h: 0.08 };
 }
 
+export const PLACEHOLDER_STRINGS = new Set([
+  "text",
+  "text line",
+  "exact line text",
+  "phrase",
+  "detected text",
+  "sample text",
+  "placeholder",
+  "the line text exactly as shown",
+  "line text",
+  "exact text",
+  "line"
+]);
+
+export function validateOcrResult(visionData) {
+  if (!visionData) return false;
+  const regions = visionData.text_regions || visionData.lines || [];
+  if (!Array.isArray(regions) || regions.length === 0) {
+    return false;
+  }
+
+  const lines = [];
+  for (const r of regions) {
+    const text = (typeof r === "string" ? r : r.text || r.label || "").trim().toLowerCase();
+    if (!text) continue;
+    if (
+      PLACEHOLDER_STRINGS.has(text) ||
+      /^exact\s*line\s*text$/i.test(text) ||
+      /^text\s*line$/i.test(text) ||
+      /^sample\s*text$/i.test(text)
+    ) {
+      console.warn(`[validateOcrResult] Rejected placeholder string in OCR output: "${text}"`);
+      return false;
+    }
+    lines.push(text);
+  }
+
+  if (lines.length === 0) {
+    return false;
+  }
+
+  // Check if the lines are all identical
+  if (lines.length > 1 && new Set(lines).size === 1) {
+    console.warn(`[validateOcrResult] Rejected OCR output: all ${lines.length} lines are identical ("${lines[0]}")`);
+    return false;
+  }
+
+  // If only a single line was returned and it's 1-2 characters (e.g. just a logo mark 'C'), reject so it retries
+  if (lines.length === 1 && lines[0].length <= 2) {
+    console.warn(`[validateOcrResult] Rejected OCR output: only single-letter mark detected ("${lines[0]}")`);
+    return false;
+  }
+
+  return true;
+}
+
+const ocrResponseSchema = {
+  type: "OBJECT",
+  description: "Text detection and logo recognition results",
+  properties: {
+    has_logo: {
+      type: "BOOLEAN",
+      description: "True if the brand logo, emblem, or mark is visually present in the image"
+    },
+    lines: {
+      type: "ARRAY",
+      description: "Array containing every single text line or element visible in the image",
+      items: {
+        type: "OBJECT",
+        properties: {
+          text: {
+            type: "STRING",
+            description: "The verbatim text transcribed from the image"
+          },
+          box_2d: {
+            type: "ARRAY",
+            description: "Bounding box coordinates [ymin, xmin, ymax, xmax] as integers from 0 to 1000",
+            items: {
+              type: "INTEGER"
+            }
+          }
+        },
+        required: ["text", "box_2d"]
+      }
+    }
+  },
+  required: ["has_logo", "lines"]
+};
+
 function extractTextValue(item) {
   if (!item) return "";
   const candidates = [item.text, item.label, item.phrase, item.content, item.line, item.name];
   for (const c of candidates) {
-    if (typeof c === "string" && c.trim() && !/^(text|exact line text|phrase|detected text|the line text exactly as shown)$/i.test(c.trim())) {
+    if (typeof c === "string" && c.trim() && !/^(text|exact line text|phrase|detected text|the line text exactly as shown|sample text|placeholder)$/i.test(c.trim())) {
       return c.trim();
     }
   }
@@ -306,45 +395,47 @@ function parseVisionOutput(rawText) {
   const text_regions = [];
   const nonLogoTexts = [];
 
-  if (Array.isArray(parsed)) {
-    const texts = [];
-    const total = parsed.length;
-    for (let i = 0; i < parsed.length; i++) {
-      const item = parsed[i];
-      const textVal = extractTextValue(item);
-      if (!textVal) continue;
-      texts.push(textVal);
-      // Skip single-letter text such as a logo mark (e.g. "C")
-      if (textVal.length > 1 || !/^[A-Za-z]$/.test(textVal)) {
-        nonLogoTexts.push(textVal);
-      }
-      const coords = extractBoundingBox(item, i, total);
-      text_regions.push({ text: textVal, ...coords });
+  const rawRegions = Array.isArray(parsed)
+    ? parsed
+    : (parsed && typeof parsed === "object")
+    ? (parsed.lines || parsed.text_regions || parsed.boxes || [])
+    : [];
+
+  const total = rawRegions.length;
+  const texts = [];
+
+  for (let i = 0; i < rawRegions.length; i++) {
+    const item = rawRegions[i];
+    const textVal = extractTextValue(item);
+    if (!textVal) continue;
+    texts.push(textVal);
+    // Skip single-letter text such as a logo mark (e.g. "C")
+    if (textVal.length > 1 || !/^[A-Za-z]$/.test(textVal)) {
+      nonLogoTexts.push(textVal);
     }
+    const coords = extractBoundingBox(item, i, total);
+    text_regions.push({ text: textVal, ...coords });
+  }
+
+  if (typeof parsed === "object" && parsed !== null && typeof parsed.extracted_text === "string" && parsed.extracted_text.trim()) {
+    extracted_text = parsed.extracted_text.trim();
+  } else {
     extracted_text = texts.join("\n");
-  } else if (typeof parsed === "object" && parsed !== null) {
-    extracted_text = (parsed.extracted_text || parsed.text || "").trim();
-    const rawRegions = parsed.text_regions || parsed.boxes || [];
-    const total = rawRegions.length;
-    for (let i = 0; i < rawRegions.length; i++) {
-      const r = rawRegions[i];
-      const textVal = extractTextValue(r);
-      if (!textVal) continue;
-      if (textVal.length > 1 || !/^[A-Za-z]$/.test(textVal)) {
-        nonLogoTexts.push(textVal);
-      }
-      const coords = extractBoundingBox(r, i, total);
-      text_regions.push({ text: textVal, ...coords });
-    }
   }
 
   const baseForAlt = nonLogoTexts.length > 0
     ? nonLogoTexts.join(" ")
     : extracted_text.split(/\n+/).filter(line => line.trim().length > 1 || !/^[A-Za-z]$/.test(line.trim())).join(" ");
 
-  const rawAlt = parsed?.alt_text || parsed?.alt || (baseForAlt ? `Marketing banner: ${baseForAlt}` : "Marketing banner image.");
+  const rawAlt = (parsed && typeof parsed === "object" && (parsed.alt_text || parsed.alt))
+    ? (parsed.alt_text || parsed.alt)
+    : (baseForAlt ? `Marketing banner: ${baseForAlt}` : "Marketing banner image.");
+
   const alt_text = formatAutoAltText(rawAlt, 125);
-  const has_logo = Boolean(parsed?.has_logo || parsed?.logo || /CampusPro/i.test(extracted_text));
+  const has_logo = Boolean(
+    (parsed && typeof parsed === "object" && (parsed.has_logo || parsed.logo)) ||
+    /CampusPro/i.test(extracted_text)
+  );
 
   return { extracted_text, text_regions, alt_text, has_logo };
 }
@@ -379,27 +470,35 @@ export async function runVisualAudit({
 
   if (visualAuditCache.has(cacheKey)) {
     const cached = JSON.parse(JSON.stringify(visualAuditCache.get(cacheKey)));
-    cached.timings_ms = {
-      upload: 1,
-      resize: 0,
-      gemini_ocr: 0,
-      review: 0,
-      validator: 0,
-      contrast: 0,
-      palette: 0,
-      total: 1,
-      cached: true
-    };
-    if (onStage) {
-      onStage("upload", "Image verified (cached)", 1);
-      onStage("resize", "Downscaled (cached)", 0);
-      onStage("gemini_ocr", "Gemini OCR (cached)", 0);
-      onStage("palette", "Palette compliance (cached)", 0);
-      onStage("contrast", "Typography contrast (cached)", 0);
-      onStage("review", "Brand rules review (cached)", 0);
-      onStage("validator", "Validation & deduplication (cached)", 0);
+    const cachedText = (cached.extracted_text || "").trim();
+    const hasPlaceholders = (cached.regions || []).some(r =>
+      PLACEHOLDER_STRINGS.has((r.text || "").trim().toLowerCase())
+    );
+    if (cachedText === "Text could not be read, please retry" || hasPlaceholders) {
+      visualAuditCache.delete(cacheKey);
+    } else {
+      cached.timings_ms = {
+        upload: 1,
+        resize: 0,
+        gemini_ocr: 0,
+        review: 0,
+        validator: 0,
+        contrast: 0,
+        palette: 0,
+        total: 1,
+        cached: true
+      };
+      if (onStage) {
+        onStage("upload", "Image verified (cached)", 1);
+        onStage("resize", "Downscaled (cached)", 0);
+        onStage("gemini_ocr", "Gemini OCR (cached)", 0);
+        onStage("palette", "Palette compliance (cached)", 0);
+        onStage("contrast", "Typography contrast (cached)", 0);
+        onStage("review", "Brand rules review (cached)", 0);
+        onStage("validator", "Validation & deduplication (cached)", 0);
+      }
+      return cached;
     }
-    return cached;
   }
 
   // 2. STAGE: UPLOAD & FORMAT VALIDATION
@@ -465,16 +564,15 @@ export async function runVisualAudit({
 
   const runOcrTask = async () => {
     const t0 = Date.now();
-    let visionData = null;
-    let lastVisionError = null;
 
     const genConfig = {
       responseMimeType: "application/json",
+      responseSchema: ocrResponseSchema,
       temperature: 0,
       maxOutputTokens: 1024
     };
 
-    const promptText = 'Extract all text lines from this image with bounding boxes. Return JSON array: [{"text": "exact line text", "box_2d": [ymin, xmin, ymax, xmax]}] where coordinates are integers from 0 to 1000.';
+    const promptText = "Detect and transcribe all text in this image. Include all headings, body text, bullet points, button labels, and brand names with 2D bounding box coordinates.";
 
     const buildPayload = (cfg) => ({
       contents: [
@@ -489,49 +587,66 @@ export async function runVisualAudit({
       generationConfig: cfg
     });
 
-    for (const model of CANDIDATE_MODELS) {
-      try {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 45000);
+    const executeCall = async () => {
+      let lastVisionError = null;
+      for (const model of CANDIDATE_MODELS) {
+        try {
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 45000);
 
-        const response = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(buildPayload(genConfig)),
-          signal: controller.signal
-        });
+          const response = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(buildPayload(genConfig)),
+            signal: controller.signal
+          });
 
-        clearTimeout(timeout);
+          clearTimeout(timeout);
 
-        if (response.ok) {
-          const rawJson = await response.json();
-          let rawText = rawJson.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
-          visionData = parseVisionOutput(rawText);
-          break;
-        } else {
-          const errBody = await response.text();
-          console.warn(`[Visual Gemini ${model}] ${response.status}: ${errBody.slice(0, 100)}`);
-          lastVisionError = new Error(`Vision model returned ${response.status}`);
+          if (response.ok) {
+            const rawJson = await response.json();
+            let rawText = rawJson.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+            return parseVisionOutput(rawText);
+          } else {
+            const errBody = await response.text();
+            console.warn(`[Visual Gemini ${model}] ${response.status}: ${errBody.slice(0, 100)}`);
+            lastVisionError = new Error(`Vision model returned ${response.status}`);
+          }
+        } catch (err) {
+          console.warn(`[Visual Gemini ${model}] failed: ${err.message}`, err.cause || "");
+          lastVisionError = err;
         }
-      } catch (err) {
-        console.warn(`[Visual Gemini ${model}] failed: ${err.message}`, err.cause || "");
-        lastVisionError = err;
       }
-    }
+      return null;
+    };
 
-    if (!visionData) {
-      console.warn("[Visual Review] Gemini Vision failed across all models:", lastVisionError?.message);
-      visionData = {
-        extracted_text: "",
-        text_regions: [],
-        alt_text: "Marketing banner image.",
-        has_logo: false
-      };
+    let visionData = await executeCall();
+    let isValid = validateOcrResult(visionData);
+
+    // If validation fails (placeholder string, all lines identical, or empty), retry once
+    if (!isValid) {
+      console.warn("[Visual OCR] Initial OCR result failed validation. Retrying once...");
+      visionData = await executeCall();
+      isValid = validateOcrResult(visionData);
     }
 
     const dur = Math.max(1, Date.now() - t0);
-    if (onStage) onStage("gemini_ocr", "Gemini Vision OCR text extracted", dur);
+
+    if (!isValid || !visionData) {
+      console.warn("[Visual OCR] OCR failed after retry. Marking as unreadable.");
+      visionData = {
+        extracted_text: "Text could not be read, please retry",
+        text_regions: [],
+        alt_text: "",
+        has_logo: false,
+        ocr_failed: true
+      };
+      if (onStage) onStage("gemini_ocr", "OCR text could not be read (retried)", dur);
+    } else {
+      if (onStage) onStage("gemini_ocr", "Gemini Vision OCR completed", dur);
+    }
+
     return { visionData, dur };
   };
 
@@ -627,19 +742,22 @@ export async function runVisualAudit({
   const paletteSummary = paletteOutcome.paletteSummary;
   const paletteTime = paletteOutcome.dur;
 
-  const extractedText = (visionData.extracted_text || visionData.text || "").trim();
-  const textRegions = Array.isArray(visionData.text_regions || visionData.boxes)
+  const isOcrFailed = Boolean(visionData.ocr_failed || visionData.extracted_text === "Text could not be read, please retry");
+  const extractedText = isOcrFailed ? "Text could not be read, please retry" : (visionData.extracted_text || visionData.text || "").trim();
+  const textRegions = isOcrFailed ? [] : (Array.isArray(visionData.text_regions || visionData.boxes)
     ? (visionData.text_regions || visionData.boxes)
-    : [];
-  let altText = formatAutoAltText(visionData.alt_text || visionData.alt || extractedText, 125);
-  const hasLogo = Boolean(visionData.has_logo || visionData.logo || visionData.campuspro_logo_detected);
+    : []);
+  let altText = isOcrFailed ? "" : formatAutoAltText(visionData.alt_text || visionData.alt || extractedText, 125);
+  const hasLogo = isOcrFailed ? false : Boolean(visionData.has_logo || visionData.logo || /CampusPro/i.test(extractedText));
 
   const allFindings = [];
 
   // Prompt injection scanner on extracted text
-  const injectionFindings = detectPromptInjection(extractedText);
-  for (const inj of injectionFindings) {
-    allFindings.push(inj);
+  if (!isOcrFailed) {
+    const injectionFindings = detectPromptInjection(extractedText);
+    for (const inj of injectionFindings) {
+      allFindings.push(inj);
+    }
   }
 
   // 5. PARALLEL STAGE 2: Text Review + Typography WCAG Contrast Analysis
@@ -648,7 +766,7 @@ export async function runVisualAudit({
   const runTextReviewTask = async () => {
     const t0 = Date.now();
     let rawAiFindings = [];
-    if (extractedText !== "") {
+    if (!isOcrFailed && extractedText !== "") {
       try {
         const activeRules = [...rules, ...(visualSettings?.rules || [])];
         const reviewResult = await callGeminiReview({
@@ -671,6 +789,12 @@ export async function runVisualAudit({
     const t0 = Date.now();
     const contrastResults = [];
     const contrastFindings = [];
+
+    if (isOcrFailed || textRegions.length === 0) {
+      const dur = Math.max(1, Date.now() - t0);
+      if (onStage) onStage("contrast", "Typography contrast skipped", dur);
+      return { contrastResults, contrastFindings, dur };
+    }
 
     // Extract uncompressed raw image buffer at original resolution for exact pixel sampling
     let origRawBuffer = null;
@@ -923,38 +1047,40 @@ export async function runVisualAudit({
   }
 
   // 6. DISCLAIMER & ALT TEXT CHECKS
-  const disclaimerPhrase = (visualSettings.disclaimerPhrase || "").trim();
-  if (disclaimerPhrase !== "") {
-    const found = extractedText.toLowerCase().includes(disclaimerPhrase.toLowerCase());
-    if (!found) {
+  if (!isOcrFailed) {
+    const disclaimerPhrase = (visualSettings.disclaimerPhrase || "").trim();
+    if (disclaimerPhrase !== "") {
+      const found = extractedText.toLowerCase().includes(disclaimerPhrase.toLowerCase());
+      if (!found) {
+        allFindings.push({
+          id: `finding-disclaimer-${Date.now()}`,
+          rule_id: "V-04",
+          quote: "(Missing disclaimer)",
+          category: "claim",
+          severity: "high",
+          explanation: `The required disclaimer phrase "${disclaimerPhrase}" was not found in the image text.`,
+          suggested_fix: `Add the required disclaimer: "${disclaimerPhrase}"`,
+          needs_human_judgement: false,
+          source: "disclaimer",
+          status: "pending"
+        });
+      }
+    }
+
+    if (!altText || altText.trim() === "") {
       allFindings.push({
-        id: `finding-disclaimer-${Date.now()}`,
-        rule_id: "V-04",
-        quote: "(Missing disclaimer)",
-        category: "claim",
-        severity: "high",
-        explanation: `The required disclaimer phrase "${disclaimerPhrase}" was not found in the image text.`,
-        suggested_fix: `Add the required disclaimer: "${disclaimerPhrase}"`,
-        needs_human_judgement: false,
-        source: "disclaimer",
+        id: `finding-alt-${Date.now()}`,
+        rule_id: "V-03",
+        quote: "(Missing alt text)",
+        category: "accessibility",
+        severity: "medium",
+        explanation: "Every marketing image needs alt text for accessibility.",
+        suggested_fix: "Add descriptive alt text describing the visible banner content.",
+        needs_human_judgement: true,
+        source: "alt_text",
         status: "pending"
       });
     }
-  }
-
-  if (!altText || altText.trim() === "") {
-    allFindings.push({
-      id: `finding-alt-${Date.now()}`,
-      rule_id: "V-03",
-      quote: "(Missing alt text)",
-      category: "accessibility",
-      severity: "medium",
-      explanation: "Every marketing image needs alt text for accessibility.",
-      suggested_fix: "Add descriptive alt text describing the visible banner content.",
-      needs_human_judgement: true,
-      source: "alt_text",
-      status: "pending"
-    });
   }
 
   // 7. STAGE: VALIDATOR (Only call validator / retry when a finding fails rule-based checks, max 1 retry)
@@ -1091,8 +1217,10 @@ export async function runVisualAudit({
       timings_ms
     };
 
-    // Cache in-memory by SHA-256
-    visualAuditCache.set(cacheKey, finalResult);
+    // Cache in-memory by SHA-256 only if OCR succeeded
+    if (!isOcrFailed && extractedText !== "Text could not be read, please retry") {
+      visualAuditCache.set(cacheKey, finalResult);
+    }
 
     return finalResult;
   }
@@ -1135,6 +1263,8 @@ export async function runVisualAudit({
     timings_ms
   };
 
-  visualAuditCache.set(cacheKey, finalResult);
+  if (!isOcrFailed && extractedText !== "Text could not be read, please retry") {
+    visualAuditCache.set(cacheKey, finalResult);
+  }
   return finalResult;
 }

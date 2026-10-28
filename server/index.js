@@ -7,7 +7,7 @@ import { INITIAL_RULES, INITIAL_FACTS, SAMPLE_DRAFTS, INITIAL_VISUAL_SETTINGS } 
 import { callGeminiReview, ACTIVE_MODEL } from "./geminiService.js";
 import { validateFindings } from "./validator.js";
 import { loadWorkspace, saveWorkspace, resetWorkspace } from "./workspaceStore.js";
-import { runVisualAudit } from "./visualAuditor.js";
+import { runVisualAudit, clearVisualAuditCache } from "./visualAuditor.js";
 import { detectPromptInjection } from "./securityScanner.js";
 import {
   createComplianceCertificate,
@@ -22,6 +22,9 @@ const __dirname = path.dirname(__filename);
 
 dotenv.config({ path: path.join(__dirname, ".env") });
 dotenv.config();
+
+// Clear visual audit cache on startup to purge any stale/corrupted entries for sample banners
+clearVisualAuditCache();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
