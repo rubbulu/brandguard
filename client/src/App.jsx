@@ -55,6 +55,11 @@ export default function App() {
     return ["manager", "creator", "reviewer", "insights"].includes(hash) ? hash : "manager";
   });
 
+  const changeRole = (role) => {
+    setActiveRole(role);
+    window.location.hash = `#/${role}`;
+  };
+
   // Certificate & Verification State
   const [verifyCertId, setVerifyCertId] = useState(() => {
     const pathname = window.location.pathname;
@@ -85,6 +90,19 @@ export default function App() {
     const isVerify = window.location.pathname.startsWith("/verify/") || rawHash.startsWith("#/verify/");
     return isNoHash && !isVerify;
   });
+  const isFirstScreenWelcomeRef = useRef(
+    typeof window !== "undefined" &&
+    (!window.location.hash || window.location.hash === "#" || window.location.hash === "#/") &&
+    !window.location.pathname.startsWith("/verify/")
+  );
+
+  const handleCloseGuideModal = () => {
+    setShowGuideModal(false);
+    if (isFirstScreenWelcomeRef.current) {
+      changeRole("manager");
+      isFirstScreenWelcomeRef.current = false;
+    }
+  };
 
   // Brand Library State
   const [rules, setRules] = useState([]);
@@ -202,6 +220,8 @@ export default function App() {
       setVerifyCertId(null);
       if (["manager", "creator", "reviewer", "insights"].includes(hash)) {
         setActiveRole(hash);
+      } else if (!hash) {
+        changeRole("manager");
       }
     };
     window.addEventListener("hashchange", handleUrlChange);
@@ -209,18 +229,15 @@ export default function App() {
     const rawHash = window.location.hash;
     const isNoHash = !rawHash || rawHash === "#" || rawHash === "#/";
     if (isNoHash && !window.location.pathname.startsWith("/verify/")) {
-      window.location.hash = "#/manager";
+      changeRole("manager");
+      setShowGuideModal(true);
+      isFirstScreenWelcomeRef.current = true;
     }
     return () => {
       window.removeEventListener("hashchange", handleUrlChange);
       window.removeEventListener("popstate", handleUrlChange);
     };
   }, []);
-
-  const changeRole = (role) => {
-    setActiveRole(role);
-    window.location.hash = `#/${role}`;
-  };
 
   // 2. Initial Setup and Health Pings (wakes up sleeping Render instance)
   useEffect(() => {
@@ -1572,7 +1589,10 @@ export default function App() {
             </button>
 
             <button
-              onClick={() => setShowGuideModal(true)}
+              onClick={() => {
+                isFirstScreenWelcomeRef.current = false;
+                setShowGuideModal(true);
+              }}
               className="px-2.5 py-1.5 rounded-lg border border-blue-200 bg-blue-50 text-xs font-bold text-blue-700 hover:bg-blue-100 flex items-center gap-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
               <HelpCircle className="w-3.5 h-3.5" />
@@ -3525,13 +3545,13 @@ export default function App() {
           role="dialog"
           aria-modal="true"
           aria-labelledby="guide-modal-title"
-          onClick={() => setShowGuideModal(false)}
+          onClick={handleCloseGuideModal}
           className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4 animate-fade-in"
         >
           <div
             onClick={(e) => e.stopPropagation()}
             onKeyDown={(e) => {
-              if (e.key === "Escape") setShowGuideModal(false);
+              if (e.key === "Escape") handleCloseGuideModal();
             }}
             tabIndex={-1}
             className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-xl border border-slate-200 space-y-5 focus:outline-none"
@@ -3544,7 +3564,7 @@ export default function App() {
                 </h3>
               </div>
               <button
-                onClick={() => setShowGuideModal(false)}
+                onClick={handleCloseGuideModal}
                 className="text-slate-400 hover:text-slate-700 p-1 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                 aria-label="Close guide modal"
               >
@@ -3593,13 +3613,14 @@ export default function App() {
 
             <div className="pt-3 border-t border-slate-100 flex items-center justify-end gap-3">
               <button
-                onClick={() => setShowGuideModal(false)}
+                onClick={handleCloseGuideModal}
                 className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-300"
               >
                 Close
               </button>
               <button
                 onClick={() => {
+                  isFirstScreenWelcomeRef.current = false;
                   setShowGuideModal(false);
                   handleLoadDemoScenario();
                 }}
