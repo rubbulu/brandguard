@@ -141,21 +141,35 @@ code, .font-mono {
 
 /* Print Stylesheet for A4 Compliance Verification Certificate */
 @media print {
-  body {
+  @page {
+    size: A4 portrait;
+    margin: 10mm;
+  }
+
+  html, body {
     background: #ffffff !important;
-    color: #000000 !important;
+    color: #0f172a !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+    height: auto !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
   }
 
-  .no-print, header, nav, footer, .app-header, .app-nav, button {
-    display: none !important;
-  }
-
-  .certificate-sheet {
-    box-shadow: none !important;
-    border: none !important;
+  /* Reset modal overlays and backdrops so they do not add height or extra pages */
+  .fixed, .fixed.inset-0 {
+    position: static !important;
+    background: transparent !important;
     padding: 0 !important;
     margin: 0 !important;
-    width: 100% !important;
+    overflow: visible !important;
+    display: block !important;
+  }
+
+  /* Hide interactive / non-printable UI */
+  .no-print, header, nav, footer, .app-header, .app-nav, button {
+    display: none !important;
   }
 
   .certificate-modal-container {
@@ -164,8 +178,195 @@ code, .font-mono {
     padding: 0 !important;
   }
 
-  @page {
-    size: A4 portrait;
-    margin: 12mm 12mm 12mm 12mm;
+  .certificate-sheet {
+    box-shadow: none !important;
+    border: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    color: #0f172a !important;
+  }
+
+  /* Section vertical spacing reduction */
+  .certificate-sheet .mb-6 {
+    margin-bottom: 6px !important;
+  }
+
+  /* Section headings */
+  .certificate-sheet h2 {
+    font-size: 8.5px !important;
+    margin-bottom: 2px !important;
+    letter-spacing: 0.05em !important;
+    line-height: 1.2 !important;
+  }
+
+  /* Header Seal & Title */
+  .certificate-sheet > div:first-child {
+    padding-bottom: 5px !important;
+    margin-bottom: 6px !important;
+    border-bottom-width: 1.5px !important;
+  }
+
+  .certificate-sheet h1 {
+    font-size: 15px !important;
+    line-height: 1.15 !important;
+    margin: 0 !important;
+  }
+
+  .certificate-sheet h1 + p {
+    font-size: 8.5px !important;
+    margin-top: 1px !important;
+  }
+
+  /* Metadata Grid */
+  .certificate-sheet .grid.grid-cols-2.sm\:grid-cols-4 {
+    gap: 4px !important;
+    padding: 4px 8px !important;
+    font-size: 8px !important;
+    margin-bottom: 6px !important;
+  }
+
+  .certificate-sheet .grid.grid-cols-2.sm\:grid-cols-4 span {
+    line-height: 1.15 !important;
+  }
+
+  /* Findings Summary Stats */
+  .certificate-sheet .grid.grid-cols-2.sm\:grid-cols-5 {
+    gap: 4px !important;
+  }
+
+  .certificate-sheet .grid.grid-cols-2.sm\:grid-cols-5 > div {
+    padding: 3px 4px !important;
+  }
+
+  .certificate-sheet .grid.grid-cols-2.sm\:grid-cols-5 .text-base {
+    font-size: 11px !important;
+    line-height: 1.1 !important;
+  }
+
+  .certificate-sheet .grid.grid-cols-2.sm\:grid-cols-5 .text-\[11px\] {
+    font-size: 7.5px !important;
+  }
+
+  /* Redline Diff */
+  .certificate-sheet .border.border-slate-300 {
+    border-radius: 6px !important;
+  }
+
+  .certificate-sheet .px-4.py-3.bg-slate-950\/80 {
+    padding: 2px 6px !important;
+    font-size: 8px !important;
+  }
+
+  .certificate-sheet .px-4.py-3.bg-slate-950\/80 span {
+    font-size: 8px !important;
+  }
+
+  .certificate-sheet .diff-chunks,
+  .certificate-sheet .bg-slate-950\/60 {
+    padding: 4px 6px !important;
+    font-size: 8.5px !important;
+    line-height: 1.25 !important;
+  }
+
+  /* Final Approved Copy */
+  .certificate-sheet .p-4.rounded-xl.bg-slate-50 {
+    padding: 4px 8px !important;
+    font-size: 8.5px !important;
+    line-height: 1.25 !important;
+  }
+
+  /* Reviewer Note (if present) */
+  .certificate-sheet .bg-blue-50\/60 {
+    padding: 4px 8px !important;
+    font-size: 8px !important;
+    line-height: 1.2 !important;
+    margin-bottom: 5px !important;
+  }
+
+  /* Policies & Facts */
+  .certificate-sheet .p-3.bg-slate-50 {
+    padding: 3px 6px !important;
+    font-size: 8px !important;
+  }
+
+  .certificate-sheet .p-3.bg-slate-50 .text-\[11px\] {
+    font-size: 7.5px !important;
+    padding: 1px 3px !important;
+  }
+
+  /* Cryptographic Signed Record Box & QR Code Box */
+  .cert-signed-box {
+    padding: 5px 8px !important;
+    gap: 8px !important;
+    margin-bottom: 5px !important;
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+  }
+
+  .cert-signed-box .space-y-3 {
+    gap: 2px !important;
+  }
+
+  .cert-signed-box .space-y-3 > div {
+    margin-bottom: 2px !important;
+  }
+
+  .cert-signed-box code {
+    font-size: 7px !important;
+    padding: 1px 3px !important;
+    line-height: 1.1 !important;
+    word-break: break-all !important;
+  }
+
+  .cert-signed-box span {
+    font-size: 7.5px !important;
+    line-height: 1.1 !important;
+  }
+
+  .cert-signed-box a {
+    font-size: 7.5px !important;
+  }
+
+  .cert-qr-box {
+    padding: 2px !important;
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+  }
+
+  .cert-qr-box img {
+    width: 48px !important;
+    height: 48px !important;
+  }
+
+  .cert-qr-box span {
+    font-size: 7px !important;
+    margin-top: 1px !important;
+  }
+
+  /* AI Tools Disclosure */
+  .certificate-sheet .text-\[11px\].text-slate-500.mb-6 {
+    padding: 3px 6px !important;
+    font-size: 7.5px !important;
+    line-height: 1.2 !important;
+    margin-bottom: 4px !important;
+  }
+
+  .certificate-sheet .text-\[11px\].text-slate-500.mb-6 svg {
+    width: 12px !important;
+    height: 12px !important;
+  }
+
+  /* Mandatory Footnote */
+  .certificate-sheet .border-t.border-slate-300 {
+    padding-top: 3px !important;
+    margin-top: 0 !important;
+  }
+
+  .certificate-sheet .border-t.border-slate-300 p {
+    font-size: 7.5px !important;
+    line-height: 1.1 !important;
   }
 }
+

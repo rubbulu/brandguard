@@ -285,7 +285,7 @@ export default function ComplianceCertificate({
         </div>
 
         {/* Cryptographic Verification & QR Section */}
-        <div className="p-5 rounded-xl bg-slate-900 text-slate-200 border border-slate-800 mb-6 flex flex-col sm:flex-row items-center justify-between gap-5">
+        <div className="cert-signed-box p-5 rounded-xl bg-slate-900 text-slate-200 border border-slate-800 mb-6 flex flex-col sm:flex-row items-center justify-between gap-5">
           <div className="space-y-3 flex-1 text-xs">
             <div className="flex items-center gap-2 text-emerald-400 font-bold uppercase tracking-wider text-[11px]">
               <FileCheck className="w-4 h-4" />
@@ -344,7 +344,7 @@ export default function ComplianceCertificate({
 
           {/* QR Code */}
           {qrDataUrl && (
-            <div className="flex flex-col items-center bg-white p-2.5 rounded-xl shadow border border-slate-300 text-slate-900">
+            <div className="cert-qr-box flex flex-col items-center bg-white p-2.5 rounded-xl shadow border border-slate-300 text-slate-900">
               <img src={qrDataUrl} alt="Verify QR Code" className="w-28 h-28" />
               <span className="text-[10px] font-semibold text-slate-700 mt-1 uppercase tracking-wider">
                 Scan to Verify
