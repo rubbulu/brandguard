@@ -78,8 +78,8 @@ export function createComplianceCertificate({
     reviewerLabel: `${reviewerName} (demo role)`,
     reviewerNote: reviewerNote || "Approved for publication following pre-publication brand governance check.",
     approvedAt,
-    aiModel: ACTIVE_MODEL || "gemini-flash-lite-latest",
-    aiToolsDisclosure: "Google Gemini (flash-lite) for semantic brand compliance, Sharp for typography WCAG contrast & CIE Lab palette validation, deterministic BrandGuard security scanner for prompt injection defense."
+    aiModel: draft.modelUsed || ACTIVE_MODEL || "gemini-flash-lite-latest",
+    aiToolsDisclosure: `Google Gemini (${draft.modelUsed || ACTIVE_MODEL || "gemini-flash-lite-latest"}) for semantic brand compliance, Sharp for typography WCAG contrast & CIE Lab palette validation, deterministic BrandGuard security scanner for prompt injection defense.`
   };
 
   const canonicalString = canonicalizeJson(canonicalPayload);

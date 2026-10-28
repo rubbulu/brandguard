@@ -47,8 +47,7 @@ export const ACTIVE_MODEL = process.env.GEMINI_MODEL || "gemini-flash-lite-lates
 // Robust cascade prioritizing models with active quota and fast response
 export const CANDIDATE_MODELS = [
   ACTIVE_MODEL,
-  "gemini-flash-lite-latest",
-  "gemini-3.5-flash-lite"
+  "gemini-flash-lite-latest"
 ].filter((v, i, a) => a.indexOf(v) === i);
 
 export async function callGeminiReview({ apiKey, draftText, rules, facts }) {

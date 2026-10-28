@@ -361,6 +361,7 @@ app.post(["/api/review", "/review"], async (req, res) => {
       targetDraft.status = "reviewed";
       targetDraft.findings = validationResult.accepted;
       targetDraft.validatorRejected = validationResult.rejected;
+      targetDraft.modelUsed = modelUsed || ACTIVE_MODEL;
       targetDraft.history.push({
         id: `h-${Date.now()}`,
         timestamp: new Date().toISOString(),
@@ -481,6 +482,7 @@ app.post(["/api/visual-review", "/visual-review"], async (req, res) => {
       paletteSummary: auditResult.palette_summary,
       regions: auditResult.regions,
       timings_ms: auditResult.timings_ms,
+      modelUsed: ACTIVE_MODEL,
       history: [
         {
           id: `h-${Date.now()}`,

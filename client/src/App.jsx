@@ -2399,7 +2399,7 @@ export default function App() {
                         </div>
                         <div className="flex items-center gap-2">
                           <span className="text-[11px] text-slate-500 font-mono hidden sm:inline">
-                            Model: {serverInfo.modelName}
+                            Model: {activeDraft?.modelUsed || serverInfo.modelName}
                           </span>
                           {((activeDraft.validatorRejected && activeDraft.validatorRejected.length > 0) ||
                             (activeDraft.validatorMerged && activeDraft.validatorMerged.length > 0)) && (
