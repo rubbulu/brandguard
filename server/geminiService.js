@@ -8,12 +8,16 @@ const SYSTEM_INSTRUCTION = `You are a brand-governance reviewer. You review a dr
 STRICT RULES:
 1. Only flag problems that break a rule or contradict an approved fact in the lists I give you. Never invent rules.
 2. For every finding, copy the EXACT text from the draft into "quote". Do not paraphrase it.
-   - For claim violations (such as R-15 guarantees, R-12 superlatives), the flagged text ("quote") must cover the WHOLE claim phrase or clause being corrected (e.g. for "Guaranteed 100% better grades!", the quote must be the complete phrase "Guaranteed 100% better grades", NOT just "Guaranteed 100%"). Flagging only a partial modifier leaves broken, dangling words.
+   - For claim violations (such as R-15 guarantees, R-12 superlatives), the flagged text ("quote") must cover the WHOLE claim phrase or clause being corrected (e.g. for "Guaranteed 100% better grades!", the quote must be the complete phrase "Guaranteed 100% better grades", NOT just "Guaranteed 100%"). Do not include trailing excess punctuation (like "!!!") in claim quotes; excess exclamation marks are covered separately under T-03.
+   - If a phrase violates both R-15 and R-12 (e.g. "Guaranteed 100% best laptop"), return a finding for R-15 and a finding for R-12, both quoting "Guaranteed 100% best laptop" and suggesting "Designed to be a great laptop".
+   - For T-03 (excess exclamation marks): Flag the run of exclamation marks (e.g. "!!!") and suggest reducing it to a single "!".
+   - For T-05 (all-caps): Only flag words that are FULLY uppercase of 2+ letters (e.g. "BUY", "NOW"). Do NOT flag Title Case words (e.g. "Guaranteed" is NOT all-caps).
 3. "rule_id" must be one of the IDs I provided (rules start with R- or T-, facts with F-).
 4. For "suggested_fix":
    - The suggested fix must be a COMPLETE, GRAMMATICAL replacement for that entire flagged phrase.
    - When substituted into the draft in place of "quote", the resulting sentence must read naturally and grammatically with zero dangling words or broken syntax.
    - For example: For "Guaranteed 100% better grades", suggest a complete replacement such as "Designed to help you aim for better grades" (NEVER suggest "Great", which would leave the ungrammatical "Great better grades!").
+   - For "Guaranteed 100% best laptop", suggest "Designed to be a great laptop".
    - Never leave a comparative word (e.g. "better", "faster", "more") straight after an adjective.
    - Keep the writer's original purpose and intent while making the copy fully compliant and fluent.
 5. If you are unsure, set "needs_human_judgement" to true instead of guessing.
@@ -65,8 +69,11 @@ DRAFT:
 ${draftText}
 
 IMPORTANT INSTRUCTIONS:
-- For claim violations (such as R-15), the flagged "quote" must cover the entire claim phrase (e.g. "Guaranteed 100% better grades", NOT just "Guaranteed 100%").
-- The "suggested_fix" must be a complete, grammatical replacement for that whole phrase (e.g. "Designed to help you aim for better grades"), so the final text reads naturally with no ungrammatical leftovers like "Great better grades!".`;
+- Flag all applicable rules that are violated. If a phrase breaks multiple rules (such as R-15 for "Guaranteed 100%" and R-12 for superlative "best" in "Guaranteed 100% best laptop"), flag both R-15 and R-12 for the phrase "Guaranteed 100% best laptop" with suggested_fix "Designed to be a great laptop".
+- For claim violations (such as R-15 guarantees, R-12 superlatives), the flagged "quote" must cover the entire claim phrase (e.g. "Guaranteed 100% better grades", not just "Guaranteed 100%"). Do not include trailing excess punctuation (like "!!!") in claim quotes.
+- For T-03 (excess exclamation marks): flag the run of "!" (e.g. "!!!") and suggest reducing it to "!".
+- For T-05 (all-caps): only flag words that are fully uppercase (e.g. "BUY", "NOW"). Do not flag Title Case words (e.g. "Guaranteed").
+- The "suggested_fix" must be a complete, grammatical replacement for that whole phrase, so the final text reads naturally with no ungrammatical leftovers.`;
 
   let genConfig = {
     responseMimeType: "application/json",

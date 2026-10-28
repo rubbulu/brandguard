@@ -361,6 +361,7 @@ app.post(["/api/review", "/review"], async (req, res) => {
       targetDraft.status = "reviewed";
       targetDraft.findings = validationResult.accepted;
       targetDraft.validatorRejected = validationResult.rejected;
+      targetDraft.validatorMerged = validationResult.merged;
       targetDraft.modelUsed = modelUsed || ACTIVE_MODEL;
       targetDraft.history.push({
         id: `h-${Date.now()}`,
@@ -376,6 +377,7 @@ app.post(["/api/review", "/review"], async (req, res) => {
       draftText: textToReview,
       findings: validationResult.accepted,
       validatorRejected: validationResult.rejected,
+      validatorMerged: validationResult.merged,
       stats: validationResult.stats,
       modelUsed: modelUsed || ACTIVE_MODEL,
       updatedDraft: targetDraft

@@ -212,7 +212,11 @@ export function mergeFindings(findings, draftText = "") {
             mergedId: current.id,
             rule_id: rId,
             mergedQuote: current.quote,
-            keptQuote: existing.quote
+            keptQuote: existing.quote,
+            originalQuote: current.quote,
+            quote: current.quote,
+            mergedIntoQuote: existing.quote,
+            reason: `Merged duplicate/overlapping [${rId}] finding on "${current.quote}" into "${existing.quote}".`
           });
 
           // Elevate severity if current was higher
@@ -244,6 +248,102 @@ export function mergeFindings(findings, draftText = "") {
   }
 
   return { mergedFindings: result, mergedCount, mergedList };
+}
+
+/**
+ * Check if two findings cover overlapping or nested text in draftText.
+ */
+export function areFindingsOverlapping(f1, f2, draftText) {
+  const q1 = (f1.quote || "").trim().toLowerCase();
+  const q2 = (f2.quote || "").trim().toLowerCase();
+  if (!q1 || !q2) return false;
+
+  if (q1.includes(q2) || q2.includes(q1)) return true;
+
+  if (draftText) {
+    const lower = draftText.toLowerCase();
+    const p1 = lower.indexOf(q1);
+    const p2 = lower.indexOf(q2);
+    if (p1 !== -1 && p2 !== -1) {
+      const e1 = p1 + q1.length;
+      const e2 = p2 + q2.length;
+      return (p1 < e2 && p2 < e1);
+    }
+  }
+  return false;
+}
+
+/**
+ * Check if two suggested fixes are equivalent (ignoring trailing punctuation).
+ */
+export function areFixesEquivalent(fix1, fix2) {
+  if (!fix1 || !fix2) return false;
+  const c1 = fix1.trim().replace(/[.!?]+$/, "").toLowerCase();
+  const c2 = fix2.trim().replace(/[.!?]+$/, "").toLowerCase();
+  return c1 === c2;
+}
+
+/**
+ * Merge findings of DIFFERENT rules that cover overlapping text AND suggest the same replacement.
+ * E.g., merges R-15 and R-12 into one card citing "R-15 + R-12" so the creator doesn't accept twice.
+ */
+export function mergeCrossRuleEquivalentFindings(findings, draftText = "") {
+  if (!Array.isArray(findings) || findings.length <= 1) {
+    return { findings: findings || [], mergedCount: 0, mergedList: [] };
+  }
+
+  const severityRank = { high: 3, medium: 2, low: 1 };
+  const mergedList = [];
+  let mergedCount = 0;
+  const result = [];
+  const mergedIndices = new Set();
+
+  for (let i = 0; i < findings.length; i++) {
+    if (mergedIndices.has(i)) continue;
+    let current = { ...findings[i] };
+
+    for (let j = i + 1; j < findings.length; j++) {
+      if (mergedIndices.has(j)) continue;
+      const other = findings[j];
+
+      // Check if overlapping text AND suggesting the same replacement text
+      const isOverlap = areFindingsOverlapping(current, other, draftText);
+      const isSameFix = areFixesEquivalent(current.suggested_fix, other.suggested_fix);
+
+      if (isOverlap && isSameFix) {
+        mergedIndices.add(j);
+        mergedCount++;
+
+        // Combine rule IDs uniquely: e.g. "R-15 + R-12"
+        const r1List = current.rule_id.split("+").map(s => s.trim());
+        const r2List = other.rule_id.split("+").map(s => s.trim());
+        const combinedRules = Array.from(new Set([...r1List, ...r2List])).join(" + ");
+
+        mergedList.push({
+          keptId: current.id,
+          mergedId: other.id,
+          rule_id: combinedRules,
+          mergedQuote: other.quote,
+          keptQuote: current.quote,
+          reason: `Merged [${other.rule_id}] into [${combinedRules}] because they cover overlapping text and suggest the same replacement.`
+        });
+
+        current.rule_id = combinedRules;
+
+        if ((severityRank[other.severity] || 1) > (severityRank[current.severity] || 1)) {
+          current.severity = other.severity;
+        }
+
+        if (other.explanation && !current.explanation.toLowerCase().includes(other.rule_id.toLowerCase())) {
+          current.explanation = cleanSingleSentence(`${current.explanation} Also violates ${other.rule_id}.`);
+        }
+      }
+    }
+
+    result.push(current);
+  }
+
+  return { findings: result, mergedCount, mergedList };
 }
 
 /**
@@ -336,30 +436,45 @@ export function runDeterministicToneChecks(draftText, rules = [], brandNames = [
   if (hasT03) {
     const totalExMarks = (draftText.match(/!/g) || []).length;
     if (totalExMarks > 1) {
-      const sentenceRegex = /[^.!?\n]+(?:[.!?\n]+|$)/g;
-      const sentences = [];
-      let sm;
-      while ((sm = sentenceRegex.exec(draftText)) !== null) {
-        if (sm[0].trim()) {
-          sentences.push({
-            trimmed: sm[0].trim(),
-            hasExMark: sm[0].includes("!"),
-            exCount: (sm[0].match(/!/g) || []).length
+      const runMatches = draftText.match(/!{2,}/g);
+      if (runMatches && runMatches.length > 0) {
+        const uniqueRuns = Array.from(new Set(runMatches));
+        for (const run of uniqueRuns) {
+          findings.push({
+            quote: run,
+            rule_id: "T-03",
+            category: "tone",
+            severity: "low",
+            explanation: "Friendly tone. At most one exclamation mark per post. Reduce run of exclamation marks to a single '!'.",
+            suggested_fix: "!",
+            action: "replace",
+            needs_human_judgement: false
           });
         }
-      }
+      } else {
+        const sentenceRegex = /[^.!?\n]+(?:[.!?\n]+|$)/g;
+        const sentences = [];
+        let sm;
+        while ((sm = sentenceRegex.exec(draftText)) !== null) {
+          if (sm[0].trim()) {
+            sentences.push({
+              trimmed: sm[0].trim(),
+              hasExMark: sm[0].includes("!"),
+              exCount: (sm[0].match(/!/g) || []).length
+            });
+          }
+        }
 
-      let seenExMarks = 0;
-      for (const s of sentences) {
-        if (!s.hasExMark) continue;
+        let seenExMarks = 0;
+        for (const s of sentences) {
+          if (!s.hasExMark) continue;
 
-        if (seenExMarks === 0) {
-          if (s.exCount === 1) {
+          if (seenExMarks === 0) {
             seenExMarks += 1;
             continue;
           } else {
-            // First sentence has multiple ! (e.g. "Buy now!!")
-            const fix = s.trimmed.replace(/!{2,}/g, "!");
+            // Additional sentences with ! exceed the limit of 1
+            const fix = s.trimmed.replace(/!+/g, ".");
             findings.push({
               quote: s.trimmed,
               rule_id: "T-03",
@@ -370,22 +485,8 @@ export function runDeterministicToneChecks(draftText, rules = [], brandNames = [
               action: "replace",
               needs_human_judgement: false
             });
-            seenExMarks += 1;
+            seenExMarks += s.exCount;
           }
-        } else {
-          // Additional sentences with ! exceed the limit of 1
-          const fix = s.trimmed.replace(/!+/g, ".");
-          findings.push({
-            quote: s.trimmed,
-            rule_id: "T-03",
-            category: "tone",
-            severity: "low",
-            explanation: "Friendly tone. At most one exclamation mark per post.",
-            suggested_fix: fix,
-            action: "replace",
-            needs_human_judgement: false
-          });
-          seenExMarks += s.exCount;
         }
       }
     }
@@ -404,13 +505,15 @@ export function validateFindings(draftText, rawFindings, rules = [], facts = [])
   // Run deterministic checks that run on every text draft, independent of Gemini
   const deterministicToneFindings = runDeterministicToneChecks(draftText, rules);
 
-  const rawList = Array.isArray(rawFindings) ? rawFindings : [];
+  const rawList = Array.isArray(rawFindings)
+    ? rawFindings
+    : (rawFindings && Array.isArray(rawFindings.findings) ? rawFindings.findings : []);
   const combinedRawFindings = [...rawList, ...deterministicToneFindings];
 
   const accepted = [];
   const rejected = [];
 
-  if (!Array.isArray(rawFindings) && deterministicToneFindings.length === 0) {
+  if (rawList.length === 0 && !Array.isArray(rawFindings) && typeof rawFindings !== "object" && deterministicToneFindings.length === 0) {
     return {
       accepted: [],
       rejected: [{ reason: "AI response was not a valid list of findings", raw: rawFindings }],
@@ -430,15 +533,55 @@ export function validateFindings(draftText, rawFindings, rules = [], facts = [])
     }
 
     const ruleId = (finding.rule_id || "").trim().toUpperCase();
-    const quote = (finding.quote || "").trim();
+    let quote = (finding.quote || "").trim();
     let suggestedFix = (finding.suggested_fix || "").trim();
     const rawExplanation = (finding.explanation || "").trim();
 
     // 2. Rule ID verification
+    const isRuleValid = validRuleIds.has(ruleId) || (
+      ruleId.includes("+") && ruleId.split("+").every(part => validRuleIds.has(part.trim()))
+    );
     if (!ruleId) {
       rejectionReasons.push("Missing rule_id");
-    } else if (!validRuleIds.has(ruleId)) {
+    } else if (!isRuleValid) {
       rejectionReasons.push(`Rule ID "${ruleId}" does not exist in brand rules or approved facts`);
+    }
+
+    // T-05 check: only fire when a word is fully uppercase
+    if (ruleId === "T-05") {
+      const words = quote.match(/\b[A-Za-z0-9'-]+\b/g) || [];
+      const hasAllCapsWord = words.some(w => {
+        if (w.length < 2) return false;
+        if (!/^[A-Z]+$/.test(w)) return false;
+        if (w === "CampusPro") return false;
+        return true;
+      });
+      if (!hasAllCapsWord) {
+        rejectionReasons.push("No fully uppercase words found in flagged text (T-05 only applies to fully uppercase words)");
+      }
+    }
+
+    // T-03 & claim punctuation normalization when draft has runs of exclamation marks
+    const hasRunOfExMarks = Boolean(draftText.match(/!{2,}/));
+    if (ruleId === "T-03" && hasRunOfExMarks) {
+      const runMatch = draftText.match(/!{2,}/);
+      quote = runMatch ? runMatch[0] : quote;
+      suggestedFix = "!";
+      finding.action = "replace";
+      finding.needs_human_judgement = false;
+    } else if (hasRunOfExMarks && (ruleId.startsWith("R-") || ruleId.startsWith("F-") || ruleId.includes("+"))) {
+      if (/!{2,}$/.test(quote)) {
+        quote = quote.replace(/!{2,}$/, "").trim();
+        suggestedFix = suggestedFix.replace(/[.!?]+$/, "").trim();
+      } else if (!/[.!?]$/.test(quote) && /[.!?]$/.test(suggestedFix)) {
+        const qIdx = draftText.indexOf(quote);
+        if (qIdx !== -1) {
+          const afterQ = draftText.slice(qIdx + quote.length).trimStart();
+          if (afterQ.startsWith("!")) {
+            suggestedFix = suggestedFix.replace(/[.!?]+$/, "").trim();
+          }
+        }
+      }
     }
 
     // 3. Verbatim quote verification
@@ -493,6 +636,8 @@ export function validateFindings(draftText, rawFindings, rules = [], facts = [])
       rejected.push({
         index: i,
         finding,
+        rule_id: ruleId,
+        quote: quote,
         reasons: rejectionReasons
       });
     } else {
@@ -517,61 +662,49 @@ export function validateFindings(draftText, rawFindings, rules = [], facts = [])
   }
 
   // 7. Merge overlapping or nested findings of the SAME rule_id (keep longest span)
-  const { mergedFindings, mergedCount, mergedList } = mergeFindings(accepted, draftText);
+  const { mergedFindings: sameRuleMerged, mergedCount: sameRuleMergedCount, mergedList: sameRuleMergedList } = mergeFindings(accepted, draftText);
 
-  // 8. De-duplicate findings of DIFFERENT rules on the exact same quote, keeping highest severity
-  const severityRank = { high: 3, medium: 2, low: 1 };
+  // 7b. Merge findings of DIFFERENT rules that cover overlapping text AND suggest the same replacement
+  // E.g., when R-15 and R-12 cover overlapping text and suggest the same replacement, merge them into one card citing "R-15 + R-12"
+  const { findings: crossRuleMerged, mergedCount: crossRuleMergedCount, mergedList: crossRuleMergedList } = mergeCrossRuleEquivalentFindings(sameRuleMerged, draftText);
+
+  const totalMergedCount = sameRuleMergedCount + crossRuleMergedCount;
+  const combinedMergedList = [...sameRuleMergedList, ...crossRuleMergedList];
+
+  // 8. Deduplicate only exact identical duplicates (same rule_id, quote, and fix)
+  // Findings from different rules are NOT duplicates just because they cover the same text.
   const deduplicated = [];
-  const quoteMap = new Map();
+  const seenExact = new Set();
 
-  for (const f of mergedFindings) {
-    const key = f.quote.toLowerCase();
-    if (!quoteMap.has(key)) {
-      quoteMap.set(key, []);
-    }
-    quoteMap.get(key).push(f);
-  }
-
-  for (const [key, group] of quoteMap.entries()) {
-    if (group.length === 1) {
-      deduplicated.push(group[0]);
-    } else {
-      group.sort((a, b) => {
-        const diff = (severityRank[b.severity] || 1) - (severityRank[a.severity] || 1);
-        if (diff !== 0) return diff;
-        const aIsFact = a.rule_id.startsWith("F-") ? 1 : 0;
-        const bIsFact = b.rule_id.startsWith("F-") ? 1 : 0;
-        if (bIsFact !== aIsFact) return bIsFact - aIsFact;
-        return (b.suggested_fix ? 1 : 0) - (a.suggested_fix ? 1 : 0);
+  for (const f of crossRuleMerged) {
+    const key = `${f.rule_id}::${f.quote.toLowerCase()}::${(f.suggested_fix || "").toLowerCase()}`;
+    if (seenExact.has(key)) {
+      rejected.push({
+        index: f.rawIndex,
+        finding: f,
+        rule_id: f.rule_id,
+        quote: f.quote,
+        reasons: [`Duplicate finding for [${f.rule_id}] on text "${f.quote}" dropped`]
       });
-
-      const winner = group[0];
-      deduplicated.push(winner);
-
-      for (let j = 1; j < group.length; j++) {
-        const dropped = group[j];
-        rejected.push({
-          index: dropped.rawIndex,
-          finding: dropped,
-          reasons: [`Duplicate finding on text "${dropped.quote}" dropped in favor of higher-priority [${winner.rule_id}] (${winner.severity})`]
-        });
-      }
+    } else {
+      seenExact.add(key);
+      deduplicated.push(f);
     }
   }
 
   return {
     accepted: deduplicated,
     rejected,
-    merged: mergedList,
+    merged: combinedMergedList,
     stats: {
-      total_from_ai: Array.isArray(rawFindings) ? rawFindings.length : 0,
+      total_from_ai: rawList.length,
       total_checked: combinedRawFindings.length,
       kept: deduplicated.length,
       dropped: rejected.length,
-      merged: mergedCount,
+      merged: totalMergedCount,
       accepted_count: deduplicated.length,
       rejected_count: rejected.length,
-      merged_count: mergedCount
+      merged_count: totalMergedCount
     }
   };
 }
