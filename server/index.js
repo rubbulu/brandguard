@@ -968,6 +968,7 @@ app.post("/api/certificates/:certificateId/restore", (req, res) => {
 // Fallback for SPA routing in production
 app.get("*", (req, res, next) => {
   if (req.path.startsWith("/api")) return next();
+  res.set("Cache-Control", "no-cache, no-store, must-revalidate");
   res.sendFile(path.join(clientDist, "index.html"), (err) => {
     if (err) next();
   });

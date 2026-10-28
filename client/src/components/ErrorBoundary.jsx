@@ -27,7 +27,7 @@ export default class ErrorBoundary extends React.Component {
       } else {
         // Clear any stored active draft or cookies if needed
         sessionStorage.clear();
-        window.location.hash = "#/creator";
+        window.location.hash = window.location.hash || "#/manager";
         window.location.reload();
         return;
       }
@@ -38,7 +38,7 @@ export default class ErrorBoundary extends React.Component {
   };
 
   handleReload = () => {
-    window.location.hash = "#/creator";
+    window.location.hash = window.location.hash || "#/manager";
     window.location.reload();
   };
 

@@ -98,10 +98,17 @@ export default function App() {
 
   const handleCloseGuideModal = () => {
     setShowGuideModal(false);
-    if (isFirstScreenWelcomeRef.current) {
+    if (
+      isFirstScreenWelcomeRef.current ||
+      activeRole === "manager" ||
+      !window.location.hash ||
+      window.location.hash === "#" ||
+      window.location.hash === "#/" ||
+      window.location.hash === "#/manager"
+    ) {
       changeRole("manager");
-      isFirstScreenWelcomeRef.current = false;
     }
+    isFirstScreenWelcomeRef.current = false;
   };
 
   // Brand Library State
@@ -1463,7 +1470,7 @@ export default function App() {
         certificateId={verifyCertId}
         onBack={() => {
           setVerifyCertId(null);
-          window.history.pushState(null, "", "/#/creator");
+          window.history.pushState(null, "", "/#/manager");
         }}
       />
     );
@@ -3564,6 +3571,7 @@ export default function App() {
                 </h3>
               </div>
               <button
+                type="button"
                 onClick={handleCloseGuideModal}
                 className="text-slate-400 hover:text-slate-700 p-1 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                 aria-label="Close guide modal"
@@ -3613,6 +3621,7 @@ export default function App() {
 
             <div className="pt-3 border-t border-slate-100 flex items-center justify-end gap-3">
               <button
+                type="button"
                 onClick={handleCloseGuideModal}
                 className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-300"
               >
