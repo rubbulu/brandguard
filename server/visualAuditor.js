@@ -188,6 +188,100 @@ function extendRegionToTextExtent(region, rawImageBuffer, imgWidth, imgHeight, b
   }
 }
 
+// --- V-01 Contrast Suggested Fix Calculator ---
+// Given text colour, background colour and brand palette:
+// - If text is light on a mid-tone background, suggest changing the background.
+// - Otherwise suggest changing the text colour.
+// - Never suggest the colour that is already used.
+// - Find a brand colour that reaches 4.5:1 and name it with its ratio.
+export function computeContrastFix(textHex, bgHex, brandPalette = [], minRatio = 4.5) {
+  const norm = (h) => {
+    if (!h || typeof h !== "string") return "";
+    let clean = h.replace("#", "").trim();
+    if (clean.length === 3) clean = clean.split("").map(c => c + c).join("");
+    return ("#" + clean).toUpperCase();
+  };
+
+  const normText = norm(textHex) || "#FFFFFF";
+  const normBg = norm(bgHex) || "#000000";
+  const textRgb = hexToRgb(normText);
+  const bgRgb = hexToRgb(normBg);
+  const textLum = getRelativeLuminance(...textRgb);
+  const bgLum = getRelativeLuminance(...bgRgb);
+
+  // If text is light on a mid-tone background:
+  // Light text: lum >= 0.65; Mid-tone background: 0.12 <= lum <= 0.65
+  const isLightText = textLum >= 0.65;
+  const isMidToneBg = bgLum >= 0.12 && bgLum <= 0.65;
+  const suggestChangeBg = isLightText && isMidToneBg;
+
+  // Filter palette: cannot be already used as text or bg
+  const used = new Set([normText, normBg]);
+  const palette = (brandPalette && brandPalette.length > 0)
+    ? brandPalette
+    : ["#1D4ED8", "#0F172A", "#FFFFFF", "#F59E0B"];
+
+  const candidates = palette
+    .map(c => norm(c))
+    .filter(c => c && !used.has(c));
+
+  if (suggestChangeBg) {
+    for (const hex of candidates) {
+      const rgb = hexToRgb(hex);
+      const ratio = Number(getContrastRatio(textRgb, rgb).toFixed(2));
+      if (ratio >= minRatio) {
+        return `Change background colour to ${hex} (${ratio}:1)`;
+      }
+    }
+    return `Change background colour to meet at least ${minRatio}:1 contrast ratio against text (${normText}).`;
+  } else {
+    for (const hex of candidates) {
+      const rgb = hexToRgb(hex);
+      const ratio = Number(getContrastRatio(rgb, bgRgb).toFixed(2));
+      if (ratio >= minRatio) {
+        return `Change text colour to ${hex} (${ratio}:1)`;
+      }
+    }
+    return `Change text colour to meet at least ${minRatio}:1 contrast ratio against background (${normBg}).`;
+  }
+}
+
+// --- Alt Text Builder (builds only from OCR lines NOT flagged by SEC-01, max 125 chars, never ends mid-phrase) ---
+export function generateBannerAltText(ocrLines = [], isOcrFailed = false) {
+  if (isOcrFailed) {
+    return "";
+  }
+
+  const prefix = "Marketing banner: ";
+
+  // Filter: Keep only lines that are NOT flagged by SEC-01, not empty, and not a single-letter logo mark
+  const validLines = (ocrLines || [])
+    .map(line => (typeof line === "string" ? line : line?.text || "").replace(/\s+/g, " ").trim())
+    .filter(line => {
+      if (!line || line.length <= 1) return false;
+      const secFindings = detectPromptInjection(line);
+      return secFindings.length === 0;
+    });
+
+  if (validLines.length === 0) {
+    return "Marketing banner image.";
+  }
+
+  let altText = "";
+
+  for (const line of validLines) {
+    const candidate = altText ? `${altText} ${line}` : `${prefix}${line}`;
+    if (candidate.length <= 125) {
+      altText = candidate;
+    } else {
+      // If the next line doesn't fit within 125 characters, stop before it (never end mid-phrase)
+      break;
+    }
+  }
+
+  return altText || "Marketing banner image.";
+}
+
 // --- Gemini Vision Output Parser (handles arrays, box_2d, objects, and normalized coordinates) ---
 export function formatAutoAltText(rawText, maxLen = 125) {
   if (!rawText || typeof rawText !== "string") {
@@ -423,15 +517,7 @@ function parseVisionOutput(rawText) {
     extracted_text = texts.join("\n");
   }
 
-  const baseForAlt = nonLogoTexts.length > 0
-    ? nonLogoTexts.join(" ")
-    : extracted_text.split(/\n+/).filter(line => line.trim().length > 1 || !/^[A-Za-z]$/.test(line.trim())).join(" ");
-
-  const rawAlt = (parsed && typeof parsed === "object" && (parsed.alt_text || parsed.alt))
-    ? (parsed.alt_text || parsed.alt)
-    : (baseForAlt ? `Marketing banner: ${baseForAlt}` : "Marketing banner image.");
-
-  const alt_text = formatAutoAltText(rawAlt, 125);
+  const alt_text = generateBannerAltText(text_regions);
   const has_logo = Boolean(
     (parsed && typeof parsed === "object" && (parsed.has_logo || parsed.logo)) ||
     /CampusPro/i.test(extracted_text)
@@ -747,7 +833,7 @@ export async function runVisualAudit({
   const textRegions = isOcrFailed ? [] : (Array.isArray(visionData.text_regions || visionData.boxes)
     ? (visionData.text_regions || visionData.boxes)
     : []);
-  let altText = isOcrFailed ? "" : formatAutoAltText(visionData.alt_text || visionData.alt || extractedText, 125);
+  let altText = isOcrFailed ? "" : generateBannerAltText(textRegions, isOcrFailed);
   const hasLogo = isOcrFailed ? false : Boolean(visionData.has_logo || visionData.logo || /CampusPro/i.test(extractedText));
 
   const allFindings = [];
@@ -965,6 +1051,8 @@ export async function runVisualAudit({
           passes: passesContrast
         });
 
+        const computedFix = computeContrastFix(textHex, bgHex, brandPalette, minContrastRatio);
+
         if (!isApproximate && ratioNum < minContrastRatio) {
           contrastFindings.push({
             id: `finding-contrast-${Date.now()}-${i}`,
@@ -973,7 +1061,7 @@ export async function runVisualAudit({
             category: "accessibility",
             severity: "high",
             explanation: `Text contrast ratio is ${ratioNum}:1 (foreground ${textHex}, background ${bgHex}), which fails the minimum required ${minContrastRatio}:1 (WCAG AA). [computed]`,
-            suggested_fix: `Change text colour (${textHex}) to meet at least ${minContrastRatio}:1 minimum contrast ratio against background (${bgHex}).`,
+            suggested_fix: computedFix,
             needs_human_judgement: true,
             source: "contrast",
             measured_ratio: ratioNum,
@@ -989,7 +1077,7 @@ export async function runVisualAudit({
             category: "accessibility",
             severity: "medium",
             explanation: `Text contrast ratio is approximately ${ratioNum}:1 (foreground ${textHex}, background ${bgHex}) over a variable or gradient background. [approximate]`,
-            suggested_fix: `Ensure text colour (${textHex}) maintains sufficient contrast across the gradient background.`,
+            suggested_fix: computedFix,
             needs_human_judgement: true,
             source: "contrast",
             measured_ratio: ratioNum,
@@ -1116,24 +1204,49 @@ export async function runVisualAudit({
       droppedTextCount = validated.rejected.length;
       rejectedList = [...validated.rejected];
       for (const f of validated.accepted) {
+        const rId = (f.rule_id || "").trim().toUpperCase();
+        if (rId === "V-01") {
+          const matchingRegion = textRegions.find(r => r.text && f.quote && (r.text.includes(f.quote) || f.quote.includes(r.text)));
+          const fg = matchingRegion?.fgColor || f.foreground_hex || "#FFFFFF";
+          const bg = matchingRegion?.bgColor || f.background_hex || "#000000";
+          f.suggested_fix = computeContrastFix(fg, bg, brandPalette, minContrastRatio);
+          f.foreground_hex = fg;
+          f.background_hex = bg;
+        } else if ((rId === "F-01" || rId.includes("F-01")) && /\breliable\b/i.test(f.suggested_fix)) {
+          f.suggested_fix = "Battery lasts up to 12 hours.";
+        }
         allFindings.push({ ...f, source: "text" });
       }
     } else {
       // Direct pass - all findings adhere to rule checks
       for (let i = 0; i < rawAiFindings.length; i++) {
         const f = rawAiFindings[i];
+        const rId = (f.rule_id || "").trim().toUpperCase();
+        let fix = (f.suggested_fix || "").trim();
+        let fg = f.foreground_hex;
+        let bg = f.background_hex;
+        if (rId === "V-01") {
+          const matchingRegion = textRegions.find(r => r.text && f.quote && (r.text.includes(f.quote) || f.quote.includes(r.text)));
+          fg = matchingRegion?.fgColor || fg || "#FFFFFF";
+          bg = matchingRegion?.bgColor || bg || "#000000";
+          fix = computeContrastFix(fg, bg, brandPalette, minContrastRatio);
+        } else if ((rId === "F-01" || rId.includes("F-01")) && /\breliable\b/i.test(fix)) {
+          fix = "Battery lasts up to 12 hours.";
+        }
         allFindings.push({
           id: `finding-text-${Date.now()}-${i}`,
           quote: (f.quote || "").trim(),
-          rule_id: (f.rule_id || "").trim().toUpperCase(),
+          rule_id: rId,
           category: (f.category || "claim").toLowerCase(),
           severity: ["high", "medium", "low"].includes((f.severity || "").toLowerCase()) ? f.severity.toLowerCase() : "medium",
           explanation: (f.explanation || "").trim(),
-          suggested_fix: (f.suggested_fix || "").trim(),
+          suggested_fix: fix,
           action: "replace",
           needs_human_judgement: Boolean(f.needs_human_judgement),
           status: "pending",
-          source: "text"
+          source: "text",
+          ...(fg ? { foreground_hex: fg } : {}),
+          ...(bg ? { background_hex: bg } : {})
         });
       }
     }

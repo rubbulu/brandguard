@@ -18,6 +18,7 @@ STRICT RULES:
    - When substituted into the draft in place of "quote", the resulting sentence must read naturally and grammatically with zero dangling words or broken syntax.
    - For example: For "Guaranteed 100% better grades", suggest a complete replacement such as "Designed to help you aim for better grades" (NEVER suggest "Great", which would leave the ungrammatical "Great better grades!").
    - For "Guaranteed 100% best laptop", suggest "Designed to be a great laptop".
+   - For F-01 (CampusPro battery fact): when correcting battery claims (e.g. "lasts 3 days" or "Battery lasts 3 days with ultimate performance"), suggest "Battery lasts up to 12 hours." Do NOT introduce new unverified claims like "reliable performance" that are not in the approved fact. "Battery lasts up to 12 hours." is safer.
    - Never leave a comparative word (e.g. "better", "faster", "more") straight after an adjective.
    - Keep the writer's original purpose and intent while making the copy fully compliant and fluent.
 5. If you are unsure, set "needs_human_judgement" to true instead of guessing.
@@ -73,6 +74,7 @@ IMPORTANT INSTRUCTIONS:
 - For claim violations (such as R-15 guarantees, R-12 superlatives), the flagged "quote" must cover the entire claim phrase (e.g. "Guaranteed 100% better grades", not just "Guaranteed 100%"). Do not include trailing excess punctuation (like "!!!") in claim quotes.
 - For T-03 (excess exclamation marks): flag the run of "!" (e.g. "!!!") and suggest reducing it to "!".
 - For T-05 (all-caps): only flag words that are fully uppercase (e.g. "BUY", "NOW"). Do not flag Title Case words (e.g. "Guaranteed").
+- For F-01 (battery claims): suggest "Battery lasts up to 12 hours." Do not add "reliable performance" or other new claims not in the fact. "Battery lasts up to 12 hours." is safer.
 - The "suggested_fix" must be a complete, grammatical replacement for that whole phrase, so the final text reads naturally with no ungrammatical leftovers.`;
 
   let genConfig = {

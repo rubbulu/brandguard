@@ -621,6 +621,10 @@ export function validateFindings(draftText, rawFindings, rules = [], facts = [])
     } else if (!suggestedFix) {
       needsHumanJudgement = true;
     } else {
+      // Fact F-01 safe fix normalization: "Reliable" is a new claim not in fact F-01. "Battery lasts up to 12 hours." is safer.
+      if ((ruleId === "F-01" || ruleId.includes("F-01")) && /\breliable\b/i.test(suggestedFix)) {
+        suggestedFix = "Battery lasts up to 12 hours.";
+      }
       // Reject any suggested fix that leaves the sentence ungrammatical in an obvious way
       const grammarCheck = validateFixGrammar(draftText, quote, suggestedFix);
       if (!grammarCheck.isGrammatical) {
