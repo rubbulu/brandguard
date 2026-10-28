@@ -2394,7 +2394,7 @@ export default function App() {
                           <span>
                             <strong>Validator:</strong> {activeDraft.findings?.length || 0} valid findings kept,{" "}
                             {activeDraft.validatorRejected?.length || 0} dropped,{" "}
-                            {activeDraft.stats?.merged || activeDraft.stats?.merged_count || 0} merged
+                            {activeDraft.validatorMerged?.length || 0} merged
                           </span>
                         </div>
                         <div className="flex items-center gap-2">

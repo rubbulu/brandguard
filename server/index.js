@@ -362,6 +362,7 @@ app.post(["/api/review", "/review"], async (req, res) => {
       targetDraft.findings = validationResult.accepted;
       targetDraft.validatorRejected = validationResult.rejected;
       targetDraft.validatorMerged = validationResult.merged;
+      targetDraft.stats = validationResult.stats;
       targetDraft.modelUsed = modelUsed || ACTIVE_MODEL;
       targetDraft.history.push({
         id: `h-${Date.now()}`,
