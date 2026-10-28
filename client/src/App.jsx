@@ -73,7 +73,7 @@ export default function App() {
 
   // Server & Health Status
   const [serverStatus, setServerStatus] = useState("connecting"); // 'connected' | 'waking' | 'offline'
-  const [serverInfo, setServerInfo] = useState({ modelName: "Gemini 3.5 Flash", version: "2.1.0" });
+  const [serverInfo, setServerInfo] = useState({ modelName: "gemini-flash-lite-latest", version: "2.1.0" });
   const [globalNotice, setGlobalNotice] = useState(null);
 
   // Guide Modal State
@@ -233,7 +233,7 @@ export default function App() {
         const data = await res.json();
         setServerStatus("connected");
         setServerInfo({
-          modelName: data.modelName || "Gemini 3.5 Flash",
+          modelName: data.modelName || "gemini-flash-lite-latest",
           version: data.version || "2.1.0"
         });
       } else {
@@ -2653,13 +2653,24 @@ export default function App() {
                               </div>
                             </div>
                           ) : (
-                            <div className="p-2.5 bg-slate-50 border border-slate-200/80 rounded-lg mb-3">
+                            <div className={`p-2.5 rounded-lg mb-3 border ${finding.suggested_fix === "Needs manual edit" ? "bg-amber-50/80 border-amber-200" : "bg-slate-50 border-slate-200/80"}`}>
                               <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-1">
                                 Suggested Fix
                               </span>
-                              <p className="text-xs font-semibold text-blue-900">
-                                "{finding.suggested_fix}"
-                              </p>
+                              {finding.suggested_fix === "Needs manual edit" ? (
+                                <div className="space-y-1">
+                                  <div className="inline-flex items-center gap-1.5 px-2 py-0.5 bg-amber-100 text-amber-800 border border-amber-300 rounded text-xs font-bold">
+                                    <AlertTriangle className="w-3.5 h-3.5 text-amber-600" /> Needs manual edit
+                                  </div>
+                                  <p className="text-[11px] text-amber-700">
+                                    {finding.fix_rejection_reason || "Auto-fix was rejected for ungrammatical outcome. Please edit manually."}
+                                  </p>
+                                </div>
+                              ) : (
+                                <p className="text-xs font-semibold text-blue-900">
+                                  "{finding.suggested_fix}"
+                                </p>
+                              )}
                             </div>
                           )}
 
@@ -2667,14 +2678,28 @@ export default function App() {
                           <div className="flex items-center gap-2 pt-2 border-t border-slate-100">
                             {isPending ? (
                               <>
-                                <button
-                                  onClick={() => handleFindingAction(finding.id, "accept")}
-                                  disabled={isVisualAuditing || isReviewing}
-                                  className="flex-1 py-1.5 px-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold flex items-center justify-center gap-1 transition-all focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-50"
-                                >
-                                  <Check className="w-3.5 h-3.5" /> {finding.rule_id === "SEC-01" ? "Accept Removal" : "Accept"}
-                                </button>
-                                {finding.rule_id !== "SEC-01" && (
+                                {finding.suggested_fix === "Needs manual edit" ? (
+                                  <button
+                                    onClick={() => {
+                                      setEditingFixId(finding.id);
+                                      setCustomFixText("");
+                                    }}
+                                    disabled={isVisualAuditing || isReviewing}
+                                    className="flex-1 py-1.5 px-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold flex items-center justify-center gap-1 transition-all focus:outline-none focus:ring-2 focus:ring-amber-500 disabled:opacity-50"
+                                    title="Click to write manual replacement"
+                                  >
+                                    <Edit3 className="w-3.5 h-3.5" /> Needs manual edit
+                                  </button>
+                                ) : (
+                                  <button
+                                    onClick={() => handleFindingAction(finding.id, "accept")}
+                                    disabled={isVisualAuditing || isReviewing}
+                                    className="flex-1 py-1.5 px-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold flex items-center justify-center gap-1 transition-all focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-50"
+                                  >
+                                    <Check className="w-3.5 h-3.5" /> {finding.rule_id === "SEC-01" ? "Accept Removal" : "Accept"}
+                                  </button>
+                                )}
+                                {finding.rule_id !== "SEC-01" && finding.suggested_fix !== "Needs manual edit" && (
                                   <button
                                     onClick={() => {
                                       setEditingFixId(finding.id);

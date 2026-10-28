@@ -574,7 +574,7 @@ function recomputeDraftText(originalText, findings) {
         if (text && text.includes(f.quote)) {
           text = text.replace(f.quote, "").trim();
         }
-      } else if (f.suggested_fix) {
+      } else if (f.suggested_fix && f.suggested_fix !== "Needs manual edit") {
         if (text && text.includes(f.quote)) {
           text = text.replace(f.quote, f.suggested_fix);
         }
@@ -611,6 +611,9 @@ app.patch("/api/drafts/:id/finding", (req, res) => {
   }
 
   if (action === "accept") {
+    if (finding.suggested_fix === "Needs manual edit") {
+      return res.status(400).json({ error: "This finding requires a manual edit before it can be applied." });
+    }
     finding.status = "accepted";
     draft.currentText = recomputeDraftText(draft.originalText, draft.findings);
     draft.history.push({

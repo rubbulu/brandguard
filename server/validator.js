@@ -43,6 +43,89 @@ export function cleanSingleSentence(text) {
 }
 
 /**
+ * Detects obvious ungrammatical patterns resulting from applying a suggested fix to draft text.
+ * Examples:
+ * - Leftover comparative immediately following an adjective (e.g. "Great better grades", "Good faster")
+ * - Double comparatives (e.g. "more better", "less worse")
+ * - Leftover dangling comparative following the substitution point
+ */
+export function validateFixGrammar(draftText, quote, suggestedFix) {
+  if (!suggestedFix || typeof suggestedFix !== "string" || !quote || typeof quote !== "string") {
+    return { isGrammatical: true };
+  }
+
+  const fixTrimmed = suggestedFix.trim();
+  const quoteTrimmed = quote.trim();
+
+  if (!fixTrimmed || fixTrimmed.toLowerCase() === "needs manual edit") {
+    return { isGrammatical: false, reason: "Needs manual edit" };
+  }
+
+  if (!draftText || !draftText.includes(quoteTrimmed)) {
+    return { isGrammatical: true };
+  }
+
+  // 1. Simulate replacement
+  const simulatedText = draftText.replace(quoteTrimmed, fixTrimmed);
+
+  // 2. Pattern: Adjective immediately followed by a comparative adjective
+  // e.g. "Great better", "Good faster", "Awesome more"
+  const adjComparativePattern = /\b(great|good|fine|nice|awesome|huge|real|true|solid|grand|top|cool|big|smart|superb|excellent|wonderful|fantastic|amazing|outstanding|exceptional|strong|clear)\s+(better|worse|faster|slower|more|less|harder|easier|higher|lower|stronger|weaker|smarter|longer|shorter|cheaper|richer|cleaner|greater)\b/i;
+  const matchAdjComp = simulatedText.match(adjComparativePattern);
+  if (matchAdjComp) {
+    return {
+      isGrammatical: false,
+      reason: `Leftover comparative following adjective ("${matchAdjComp[0]}"). Full claim phrase must be replaced.`
+    };
+  }
+
+  // 3. Pattern: Double comparatives (e.g. "more better", "less worse", "better faster")
+  const doubleComparativePattern = /\b(more|less|better|worse)\s+(better|worse|faster|slower|harder|easier|higher|lower|stronger|weaker|smarter|longer|shorter|cheaper)\b/i;
+  const matchDoubleComp = simulatedText.match(doubleComparativePattern);
+  if (matchDoubleComp) {
+    return {
+      isGrammatical: false,
+      reason: `Double comparative detected ("${matchDoubleComp[0]}").`
+    };
+  }
+
+  // 4. Boundary check at replacement junction:
+  // If the draft word immediately following quote is a comparative,
+  // and the fix ends with an adjective, it leaves an ungrammatical comparative leftover.
+  const quoteIndex = draftText.indexOf(quoteTrimmed);
+  if (quoteIndex !== -1) {
+    const textAfter = draftText.slice(quoteIndex + quoteTrimmed.length).trimStart();
+    const nextWordMatch = textAfter.match(/^[a-zA-Z]+/);
+    if (nextWordMatch) {
+      const nextWord = nextWordMatch[0].toLowerCase();
+      const comparatives = new Set([
+        "better", "worse", "faster", "slower", "more", "less", "harder", "easier",
+        "higher", "lower", "stronger", "weaker", "smarter", "longer", "shorter",
+        "cheaper", "richer", "cleaner", "greater"
+      ]);
+      if (comparatives.has(nextWord)) {
+        const fixWords = fixTrimmed.split(/\s+/);
+        const lastWordOfFix = fixWords[fixWords.length - 1].replace(/[^a-zA-Z]/g, "").toLowerCase();
+        const nonPrecedingWords = new Set([
+          "great", "good", "fine", "nice", "awesome", "huge", "real", "true", "solid",
+          "grand", "top", "cool", "big", "smart", "superb", "excellent", "wonderful",
+          "fantastic", "amazing", "outstanding", "exceptional", "strong", "clear",
+          "new", "modern", "high", "low"
+        ]);
+        if (nonPrecedingWords.has(lastWordOfFix)) {
+          return {
+            isGrammatical: false,
+            reason: `Leftover comparative "${nextWord}" directly following "${lastWordOfFix}". Full phrase should be replaced.`
+          };
+        }
+      }
+    }
+  }
+
+  return { isGrammatical: true };
+}
+
+/**
  * Merge overlapping or nested findings of the same rule_id into one finding (keeping longest span).
  * Enforces max one SEC-01 per text block.
  */
@@ -227,12 +310,25 @@ export function validateFindings(draftText, rawFindings, rules = [], facts = [])
     // 6. Security & fix handling
     let needsHumanJudgement = Boolean(finding.needs_human_judgement);
     let action = finding.action || "replace";
+    let fixRejected = false;
+    let fixRejectionReason = null;
+
     if (ruleId === "SEC-01") {
       suggestedFix = "";
       action = "remove";
       needsHumanJudgement = true;
     } else if (!suggestedFix) {
       needsHumanJudgement = true;
+    } else {
+      // Reject any suggested fix that leaves the sentence ungrammatical in an obvious way
+      const grammarCheck = validateFixGrammar(draftText, quote, suggestedFix);
+      if (!grammarCheck.isGrammatical) {
+        fixRejected = true;
+        fixRejectionReason = grammarCheck.reason;
+        suggestedFix = "Needs manual edit";
+        needsHumanJudgement = true;
+        action = "manual_edit";
+      }
     }
 
     if (rejectionReasons.length > 0) {
@@ -252,6 +348,8 @@ export function validateFindings(draftText, rawFindings, rules = [], facts = [])
           : "medium",
         explanation: cleanSingleSentence(rawExplanation),
         suggested_fix: suggestedFix,
+        fix_rejected: fixRejected,
+        fix_rejection_reason: fixRejectionReason,
         action: action,
         needs_human_judgement: needsHumanJudgement,
         status: "pending",
