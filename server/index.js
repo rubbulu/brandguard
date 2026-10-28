@@ -293,11 +293,30 @@ app.post("/api/drafts", (req, res) => {
 
 // --- 6. AI Review Endpoint with Validator Engine & Rate Limiting ---
 app.post(["/api/review", "/review"], async (req, res) => {
+  const isStream = req.query.stream === "true" || req.headers["x-stream"] === "true";
+
+  if (isStream) {
+    res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+    res.setHeader("Transfer-Encoding", "chunked");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+  }
+
+  const sendStage = (stage, label, duration) => {
+    if (isStream && !res.writableEnded) {
+      res.write(JSON.stringify({ type: "stage", stage, label, duration }) + "\n");
+    }
+  };
+
   try {
     const { draftId, draftText } = req.body;
 
     // Enforce rate limit per workspace
     if (!checkRateLimit(req.workspaceId)) {
+      if (isStream) {
+        res.write(JSON.stringify({ type: "error", error: "Rate limit reached (10 checks per minute). Please wait a moment." }) + "\n");
+        return res.end();
+      }
       return res.status(429).json({
         error: "Rate limit reached (10 checks per minute). Please wait a moment before running another check."
       });
@@ -314,11 +333,20 @@ app.post(["/api/review", "/review"], async (req, res) => {
     }
 
     if (!textToReview || textToReview.trim() === "") {
+      if (isStream) {
+        res.write(JSON.stringify({ type: "error", error: "Draft text is empty." }) + "\n");
+        return res.end();
+      }
       return res.status(400).json({ error: "Draft text is empty." });
     }
 
+    sendStage("init", "Draft validation & ingest");
+    sendStage("security", "Prompt injection security scan");
+
     // 1. Detect instruction-like text / prompt injection before AI review
     const injectionFindings = detectPromptInjection(textToReview);
+
+    sendStage("gemini_review", "Gemini AI policy review");
 
     // 2. Call Gemini with cascading fallback
     let rawAiFindings = [];
@@ -341,7 +369,10 @@ app.post(["/api/review", "/review"], async (req, res) => {
       rawAiFindings = [];
     }
 
+    sendStage("deterministic", "Deterministic tone checks");
+
     // 3. Run the deterministic Validator
+    sendStage("validator", "Validator governance & deduplication");
     const validationResult = validateFindings(
       textToReview,
       rawAiFindings,
@@ -373,7 +404,7 @@ app.post(["/api/review", "/review"], async (req, res) => {
       req.saveWs();
     }
 
-    res.json({
+    const payload = {
       draftId: targetDraft?.id || null,
       draftText: textToReview,
       findings: validationResult.accepted,
@@ -382,9 +413,20 @@ app.post(["/api/review", "/review"], async (req, res) => {
       stats: validationResult.stats,
       modelUsed: modelUsed || ACTIVE_MODEL,
       updatedDraft: targetDraft
-    });
+    };
+
+    if (isStream) {
+      res.write(JSON.stringify({ type: "complete", data: payload }) + "\n");
+      return res.end();
+    }
+
+    res.json(payload);
   } catch (error) {
     console.error("[Review Fatal Error]:", error);
+    if (isStream && !res.writableEnded) {
+      res.write(JSON.stringify({ type: "error", error: "An unexpected error occurred during review. Please try again." }) + "\n");
+      return res.end();
+    }
     res.status(500).json({
       error: "An unexpected error occurred during review. Please try again."
     });
