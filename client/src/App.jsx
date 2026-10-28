@@ -50,8 +50,9 @@ export default function App() {
 
   // Role / Hash Routing: '#/manager' | '#/creator' | '#/reviewer' | '#/insights'
   const [activeRole, setActiveRole] = useState(() => {
-    const hash = window.location.hash.replace("#/", "");
-    return ["manager", "creator", "reviewer", "insights"].includes(hash) ? hash : "creator";
+    const rawHash = typeof window !== "undefined" ? window.location.hash : "";
+    const hash = rawHash.replace(/^#\/?/, "");
+    return ["manager", "creator", "reviewer", "insights"].includes(hash) ? hash : "manager";
   });
 
   // Certificate & Verification State
@@ -77,7 +78,13 @@ export default function App() {
   const [globalNotice, setGlobalNotice] = useState(null);
 
   // Guide Modal State
-  const [showGuideModal, setShowGuideModal] = useState(false);
+  const [showGuideModal, setShowGuideModal] = useState(() => {
+    if (typeof window === "undefined") return false;
+    const rawHash = window.location.hash;
+    const isNoHash = !rawHash || rawHash === "#" || rawHash === "#/";
+    const isVerify = window.location.pathname.startsWith("/verify/") || rawHash.startsWith("#/verify/");
+    return isNoHash && !isVerify;
+  });
 
   // Brand Library State
   const [rules, setRules] = useState([]);
@@ -186,7 +193,8 @@ export default function App() {
         setVerifyCertId(pathname.replace("/verify/", "").trim());
         return;
       }
-      const hash = window.location.hash.replace("#/", "");
+      const rawHash = window.location.hash;
+      const hash = rawHash.replace(/^#\/?/, "");
       if (hash.startsWith("verify/")) {
         setVerifyCertId(hash.replace("verify/", "").trim());
         return;
@@ -198,8 +206,10 @@ export default function App() {
     };
     window.addEventListener("hashchange", handleUrlChange);
     window.addEventListener("popstate", handleUrlChange);
-    if (!window.location.hash && !window.location.pathname.startsWith("/verify/")) {
-      window.location.hash = "#/creator";
+    const rawHash = window.location.hash;
+    const isNoHash = !rawHash || rawHash === "#" || rawHash === "#/";
+    if (isNoHash && !window.location.pathname.startsWith("/verify/")) {
+      window.location.hash = "#/manager";
     }
     return () => {
       window.removeEventListener("hashchange", handleUrlChange);
@@ -212,18 +222,11 @@ export default function App() {
     window.location.hash = `#/${role}`;
   };
 
-  // 2. Initial Setup, Guide Modal, and Health Pings (wakes up sleeping Render instance)
+  // 2. Initial Setup and Health Pings (wakes up sleeping Render instance)
   useEffect(() => {
     // Immediate health pings on page load to wake up sleeping Render instances before user uploads
     fetch("/health").catch(() => {});
     fetch("/api/health").catch(() => {});
-
-    // Check if first-time visitor to auto-show guide modal
-    const guideShown = localStorage.getItem("brandguard_guide_shown");
-    if (!guideShown) {
-      setShowGuideModal(true);
-      localStorage.setItem("brandguard_guide_shown", "true");
-    }
 
     checkHealth();
     loadWorkspaceData();
@@ -2239,50 +2242,48 @@ export default function App() {
             {/* TAB 2: VISUAL BANNER AUDITOR SUBMISSION */}
             {creatorMode === "visual" && (
               <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs p-5 sm:p-6 space-y-4">
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                  <div>
-                    <h2 className="text-xl font-extrabold text-slate-900 tracking-tight flex items-center gap-2">
-                      <ImageIcon className="w-5 h-5 text-blue-600" />
-                      Visual Banner Auditor
-                    </h2>
-                    <p className="text-xs text-slate-500 mt-0.5">
-                      Upload display ads or marketing banners (PNG, JPG, WebP &le; 4 MB). The image is sent to Google Gemini for analysis.
-                    </p>
-                  </div>
+                <div>
+                  <h2 className="text-xl font-extrabold text-slate-900 tracking-tight flex items-center gap-2">
+                    <ImageIcon className="w-5 h-5 text-blue-600" />
+                    Visual Banner Auditor
+                  </h2>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Upload display ads or marketing banners (PNG, JPG, WebP &le; 4 MB). The image is sent to Google Gemini for analysis.
+                  </p>
+                </div>
 
-                  {/* Quick-test buttons */}
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mr-1">
-                      Quick Tests:
-                    </span>
-                    <button
-                      type="button"
-                      disabled={isVisualAuditing}
-                      onClick={() => handleLoadSampleBanner("bad-banner.png", "Sample Bad Banner")}
-                      className="px-3 py-1.5 bg-red-50 border border-red-200 text-red-700 hover:bg-red-100 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all disabled:opacity-50"
-                    >
-                      <AlertTriangle className="w-3.5 h-3.5" />
-                      Try Bad Banner
-                    </button>
-                    <button
-                      type="button"
-                      disabled={isVisualAuditing}
-                      onClick={() => handleLoadSampleBanner("clean-banner.png", "Sample Clean Banner")}
-                      className="px-3 py-1.5 bg-emerald-50 border border-emerald-200 text-emerald-700 hover:bg-emerald-100 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all disabled:opacity-50"
-                    >
-                      <CheckCircle2 className="w-3.5 h-3.5" />
-                      Try Clean Banner
-                    </button>
-                    <button
-                      type="button"
-                      disabled={isVisualAuditing}
-                      onClick={() => handleLoadSampleBanner("injection-banner.png", "Sample Prompt Injection Banner")}
-                      className="px-3 py-1.5 bg-purple-50 border border-purple-200 text-purple-700 hover:bg-purple-100 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all disabled:opacity-50"
-                    >
-                      <Shield className="w-3.5 h-3.5" />
-                      Try Injection Banner
-                    </button>
-                  </div>
+                {/* Quick-test buttons in their own row below description, left-aligned */}
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider shrink-0">
+                    QUICK TESTS:
+                  </span>
+                  <button
+                    type="button"
+                    disabled={isVisualAuditing}
+                    onClick={() => handleLoadSampleBanner("bad-banner.png", "Sample Bad Banner")}
+                    className="h-8 px-3.5 py-1.5 bg-red-50 border border-red-200 text-red-700 hover:bg-red-100 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-all disabled:opacity-50 shrink-0"
+                  >
+                    <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                    <span>Try Bad Banner</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isVisualAuditing}
+                    onClick={() => handleLoadSampleBanner("clean-banner.png", "Sample Clean Banner")}
+                    className="h-8 px-3.5 py-1.5 bg-emerald-50 border border-emerald-200 text-emerald-700 hover:bg-emerald-100 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-all disabled:opacity-50 shrink-0"
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                    <span>Try Clean Banner</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isVisualAuditing}
+                    onClick={() => handleLoadSampleBanner("injection-banner.png", "Sample Prompt Injection Banner")}
+                    className="h-8 px-3.5 py-1.5 bg-purple-50 border border-purple-200 text-purple-700 hover:bg-purple-100 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-all disabled:opacity-50 shrink-0"
+                  >
+                    <Shield className="w-3.5 h-3.5 shrink-0" />
+                    <span>Try Injection Banner</span>
+                  </button>
                 </div>
 
                 {/* Drag-and-drop / file picker zone */}
