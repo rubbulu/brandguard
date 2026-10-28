@@ -221,6 +221,74 @@ export function formatAutoAltText(rawText, maxLen = 125) {
   return shortened;
 }
 
+function extractBoundingBox(item, fallbackIdx = 0, total = 1) {
+  let b2d = item.box_2d ?? item.box ?? (Array.isArray(item.boxes) ? item.boxes[0] : null) ?? item.bounding_box;
+  while (Array.isArray(b2d) && b2d.length === 1 && (Array.isArray(b2d[0]) || typeof b2d[0] === "string")) {
+    b2d = b2d[0];
+  }
+  if (typeof b2d === "string") {
+    try {
+      const p = JSON.parse(b2d);
+      if (Array.isArray(p)) b2d = p;
+    } catch {
+      b2d = b2d.replace(/[\[\]]/g, "").split(",").map(v => parseFloat(v.trim())).filter(v => !isNaN(v));
+    }
+  }
+
+  if (Array.isArray(b2d) && b2d.length >= 4) {
+    const yminRaw = Number(b2d[0]);
+    const xminRaw = Number(b2d[1]);
+    const ymaxRaw = Number(b2d[2]);
+    const xmaxRaw = Number(b2d[3]);
+    const ymin = yminRaw > 1 ? yminRaw / 1000 : yminRaw;
+    const xmin = xminRaw > 1 ? xminRaw / 1000 : xminRaw;
+    const ymax = ymaxRaw > 1 ? ymaxRaw / 1000 : ymaxRaw;
+    const xmax = xmaxRaw > 1 ? xmaxRaw / 1000 : xmaxRaw;
+
+    const x = Math.max(0, Math.min(1, Math.min(xmin, xmax)));
+    const y = Math.max(0, Math.min(1, Math.min(ymin, ymax)));
+    const w = Math.max(0.01, Math.min(1 - x, Math.abs(xmax - xmin)));
+    const h = Math.max(0.01, Math.min(1 - y, Math.abs(ymax - ymin)));
+    return { x, y, w, h };
+  }
+
+  if (b2d && typeof b2d === "object" && b2d.xmin_normalized !== undefined) {
+    const x = Math.max(0, Math.min(1, b2d.xmin_normalized));
+    const y = Math.max(0, Math.min(1, b2d.ymin_normalized));
+    const w = Math.max(0.01, Math.min(1 - x, b2d.xmax_normalized - b2d.xmin_normalized));
+    const h = Math.max(0.01, Math.min(1 - y, b2d.ymax_normalized - b2d.ymin_normalized));
+    return { x, y, w, h };
+  }
+
+  if (item.x !== undefined && item.y !== undefined) {
+    const xRaw = Number(item.x);
+    const yRaw = Number(item.y);
+    const wRaw = Number(item.w ?? 0.8);
+    const hRaw = Number(item.h ?? 0.08);
+    const x = Math.max(0, Math.min(1, xRaw > 1 ? xRaw / 1000 : xRaw));
+    const y = Math.max(0, Math.min(1, yRaw > 1 ? yRaw / 1000 : yRaw));
+    const w = Math.max(0.01, Math.min(1 - x, wRaw > 1 ? wRaw / 1000 : wRaw));
+    const h = Math.max(0.01, Math.min(1 - y, hRaw > 1 ? hRaw / 1000 : hRaw));
+    return { x, y, w, h };
+  }
+
+  // Stagger fallback vertically across the canvas
+  const step = Math.min(0.18, 0.85 / Math.max(1, total));
+  const y = Math.min(0.85, 0.08 + fallbackIdx * step);
+  return { x: 0.08, y, w: 0.75, h: 0.08 };
+}
+
+function extractTextValue(item) {
+  if (!item) return "";
+  const candidates = [item.text, item.label, item.phrase, item.content, item.line, item.name];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.trim() && !/^(text|exact line text|phrase|detected text|the line text exactly as shown)$/i.test(c.trim())) {
+      return c.trim();
+    }
+  }
+  return (typeof item.text === "string" ? item.text : typeof item.label === "string" ? item.label : "").trim();
+}
+
 function parseVisionOutput(rawText) {
   let parsed = null;
   try {
@@ -240,65 +308,33 @@ function parseVisionOutput(rawText) {
 
   if (Array.isArray(parsed)) {
     const texts = [];
-    for (const item of parsed) {
-      if (!item || !item.text) continue;
-      const t = item.text.trim();
-      texts.push(item.text);
+    const total = parsed.length;
+    for (let i = 0; i < parsed.length; i++) {
+      const item = parsed[i];
+      const textVal = extractTextValue(item);
+      if (!textVal) continue;
+      texts.push(textVal);
       // Skip single-letter text such as a logo mark (e.g. "C")
-      if (t.length > 1 || !/^[A-Za-z]$/.test(t)) {
-        nonLogoTexts.push(t);
+      if (textVal.length > 1 || !/^[A-Za-z]$/.test(textVal)) {
+        nonLogoTexts.push(textVal);
       }
-      let x = 0.05, y = 0.05, w = 0.8, h = 0.08;
-      const b2d = item.box_2d || (Array.isArray(item.boxes) && item.boxes[0]) || item.box;
-      if (Array.isArray(b2d) && b2d.length === 4) {
-        const [ymin, xmin, ymax, xmax] = b2d.map(v => (v > 1 ? v / 1000 : v));
-        x = xmin;
-        y = ymin;
-        w = Math.max(0.01, xmax - xmin);
-        h = Math.max(0.01, ymax - ymin);
-      } else if (b2d && typeof b2d === "object" && b2d.xmin_normalized !== undefined) {
-        x = b2d.xmin_normalized;
-        y = b2d.ymin_normalized;
-        w = Math.max(0.01, b2d.xmax_normalized - b2d.xmin_normalized);
-        h = Math.max(0.01, b2d.ymax_normalized - b2d.ymin_normalized);
-      } else if (item.x !== undefined) {
-        x = item.x > 1 ? item.x / 1000 : item.x;
-        y = item.y > 1 ? item.y / 1000 : item.y;
-        w = item.w > 1 ? item.w / 1000 : item.w;
-        h = item.h > 1 ? item.h / 1000 : item.h;
-      }
-      text_regions.push({ text: item.text, x, y, w, h });
+      const coords = extractBoundingBox(item, i, total);
+      text_regions.push({ text: textVal, ...coords });
     }
     extracted_text = texts.join("\n");
   } else if (typeof parsed === "object" && parsed !== null) {
     extracted_text = (parsed.extracted_text || parsed.text || "").trim();
     const rawRegions = parsed.text_regions || parsed.boxes || [];
-    for (const r of rawRegions) {
-      if (!r || !r.text) continue;
-      const t = r.text.trim();
-      if (t.length > 1 || !/^[A-Za-z]$/.test(t)) {
-        nonLogoTexts.push(t);
+    const total = rawRegions.length;
+    for (let i = 0; i < rawRegions.length; i++) {
+      const r = rawRegions[i];
+      const textVal = extractTextValue(r);
+      if (!textVal) continue;
+      if (textVal.length > 1 || !/^[A-Za-z]$/.test(textVal)) {
+        nonLogoTexts.push(textVal);
       }
-      let x = 0.05, y = 0.05, w = 0.8, h = 0.08;
-      const b2d = r.box_2d || (Array.isArray(r.boxes) && r.boxes[0]) || r.box;
-      if (Array.isArray(b2d) && b2d.length === 4) {
-        const [ymin, xmin, ymax, xmax] = b2d.map(v => (v > 1 ? v / 1000 : v));
-        x = xmin;
-        y = ymin;
-        w = Math.max(0.01, xmax - xmin);
-        h = Math.max(0.01, ymax - ymin);
-      } else if (b2d && typeof b2d === "object" && b2d.xmin_normalized !== undefined) {
-        x = b2d.xmin_normalized;
-        y = b2d.ymin_normalized;
-        w = Math.max(0.01, b2d.xmax_normalized - b2d.xmin_normalized);
-        h = Math.max(0.01, b2d.ymax_normalized - b2d.ymin_normalized);
-      } else if (r.x !== undefined) {
-        x = r.x > 1 ? r.x / 1000 : r.x;
-        y = r.y > 1 ? r.y / 1000 : r.y;
-        w = r.w > 1 ? r.w / 1000 : r.w;
-        h = r.h > 1 ? r.h / 1000 : r.h;
-      }
-      text_regions.push({ text: r.text, x, y, w, h });
+      const coords = extractBoundingBox(r, i, total);
+      text_regions.push({ text: textVal, ...coords });
     }
   }
 
@@ -435,10 +471,10 @@ export async function runVisualAudit({
     const genConfig = {
       responseMimeType: "application/json",
       temperature: 0,
-      maxOutputTokens: 512
+      maxOutputTokens: 1024
     };
 
-    const promptText = 'Extract text from this image and bounding boxes as JSON: {"text": "all extracted text exactly as written", "boxes": [{"text": "phrase", "x": 0.1, "y": 0.2, "w": 0.8, "h": 0.1}]}';
+    const promptText = 'Extract all text lines from this image with bounding boxes. Return JSON array: [{"text": "exact line text", "box_2d": [ymin, xmin, ymax, xmax]}] where coordinates are integers from 0 to 1000.';
 
     const buildPayload = (cfg) => ({
       contents: [
@@ -479,7 +515,7 @@ export async function runVisualAudit({
           lastVisionError = new Error(`Vision model returned ${response.status}`);
         }
       } catch (err) {
-        console.warn(`[Visual Gemini ${model}] failed: ${err.message}`);
+        console.warn(`[Visual Gemini ${model}] failed: ${err.message}`, err.cause || "");
         lastVisionError = err;
       }
     }
@@ -636,22 +672,25 @@ export async function runVisualAudit({
     const contrastResults = [];
     const contrastFindings = [];
 
-    // Extract raw image buffer for column scanning / box width extension
-    let rawImageBuffer = null;
+    // Extract uncompressed raw image buffer at original resolution for exact pixel sampling
+    let origRawBuffer = null;
+    let origWidth = metadata?.width || 800;
+    let origHeight = metadata?.height || 600;
     try {
-      rawImageBuffer = await sharp(downscaledBuffer).removeAlpha().raw().toBuffer();
+      origRawBuffer = await sharp(imageBuffer).removeAlpha().raw().toBuffer();
     } catch (e) {
       console.warn("[Contrast Raw Buffer Error]:", e.message);
     }
 
     for (let i = 0; i < textRegions.length; i++) {
       const region = textRegions[i];
-      let left = Math.max(0, Math.floor((region.x || 0) * imgWidth));
-      let top = Math.max(0, Math.floor((region.y || 0) * imgHeight));
-      let width = Math.min(imgWidth - left, Math.max(1, Math.floor((region.w || 0.1) * imgWidth)));
-      let height = Math.min(imgHeight - top, Math.max(1, Math.floor((region.h || 0.1) * imgHeight)));
+      // Map normalized coordinates directly to original image resolution
+      const left = Math.max(0, Math.min(origWidth - 1, Math.round((region.x || 0) * origWidth)));
+      const top = Math.max(0, Math.min(origHeight - 1, Math.round((region.y || 0) * origHeight)));
+      const width = Math.max(4, Math.min(origWidth - left, Math.round((region.w || 0.1) * origWidth)));
+      const height = Math.max(4, Math.min(origHeight - top, Math.round((region.h || 0.05) * origHeight)));
 
-      if (width < 4 || height < 4 || left + width > imgWidth || top + height > imgHeight) {
+      if (!origRawBuffer || width < 4 || height < 4) {
         region.contrastRatio = null;
         region.calculationType = "estimated";
         region.passesContrast = null;
@@ -665,38 +704,46 @@ export async function runVisualAudit({
         continue;
       }
 
-      // Item 2: Padded box sampling for stable background
-      const padX = Math.max(4, Math.round(width * 0.08));
-      const padY = Math.max(3, Math.round(height * 0.12));
-      const leftPad = Math.max(0, left - padX);
-      const topPad = Math.max(0, top - padY);
-      const rightPad = Math.min(imgWidth, left + width + padX);
-      const bottomPad = Math.min(imgHeight, top + height + padY);
-      const padW = rightPad - leftPad;
-      const padH = bottomPad - topPad;
-
       try {
-        const regionBuffer = await sharp(downscaledBuffer)
-          .removeAlpha()
-          .extract({ left: leftPad, top: topPad, width: padW, height: padH })
-          .raw()
-          .toBuffer();
+        const padX = Math.max(3, Math.min(20, Math.round(width * 0.05)));
+        const padY = Math.max(3, Math.min(16, Math.round(height * 0.15)));
+        const minX = Math.max(0, left - padX);
+        const maxX = Math.min(origWidth - 1, left + width + padX);
+        const minY = Math.max(0, top - padY);
+        const maxY = Math.min(origHeight - 1, top + height + padY);
 
-        const numPixels = padW * padH;
-        const sampledPixels = [];
-        const step = Math.max(1, Math.floor(numPixels / 800));
-        for (let p = 0; p < numPixels; p += step) {
-          const offset = p * 3;
-          if (offset + 2 < regionBuffer.length) {
-            const r = regionBuffer[offset];
-            const g = regionBuffer[offset + 1];
-            const b = regionBuffer[offset + 2];
-            const lum = getRelativeLuminance(r, g, b);
-            sampledPixels.push({ r, g, b, lum });
+        function getPixel(px, py) {
+          const cx = Math.max(0, Math.min(origWidth - 1, px));
+          const cy = Math.max(0, Math.min(origHeight - 1, py));
+          const idx = (cy * origWidth + cx) * 3;
+          const r = origRawBuffer[idx];
+          const g = origRawBuffer[idx + 1];
+          const b = origRawBuffer[idx + 2];
+          return { r, g, b, lum: getRelativeLuminance(r, g, b), x: cx, y: cy };
+        }
+
+        // 1. Perimeter pixels around the text box
+        const perimPixels = [];
+        for (let px = minX; px <= maxX; px += 2) {
+          for (let py = minY; py < top; py++) perimPixels.push(getPixel(px, py));
+          for (let py = top + height; py <= maxY; py++) perimPixels.push(getPixel(px, py));
+        }
+        for (let py = top; py < top + height; py += 2) {
+          for (let px = minX; px < left; px++) perimPixels.push(getPixel(px, py));
+          for (let px = left + width; px <= maxX; px++) perimPixels.push(getPixel(px, py));
+        }
+
+        // 2. Inside pixels
+        const insidePixels = [];
+        const stepX = Math.max(1, Math.floor(width / 120));
+        const stepY = Math.max(1, Math.floor(height / 30));
+        for (let py = top; py < top + height; py += stepY) {
+          for (let px = left; px < left + width; px += stepX) {
+            insidePixels.push(getPixel(px, py));
           }
         }
 
-        if (sampledPixels.length < 2) {
+        if (insidePixels.length === 0) {
           region.contrastRatio = null;
           region.calculationType = "estimated";
           region.passesContrast = null;
@@ -704,72 +751,127 @@ export async function runVisualAudit({
             text: region.text,
             measured: false,
             calculationType: "estimated",
-            reason: "could not measure",
+            reason: "no inside pixels sampled",
             needs_human_judgement: true
           });
           continue;
         }
 
-        // Item 2: Estimate text and background with median in padded box
-        const clusters = estimateTextAndBgWithMedian(sampledPixels);
-        if (!clusters) {
-          region.contrastRatio = null;
-          region.calculationType = "estimated";
-          region.passesContrast = null;
-          contrastResults.push({
-            text: region.text,
-            measured: false,
-            calculationType: "estimated",
-            reason: "could not measure",
-            needs_human_judgement: true
-          });
-          continue;
+        // 3. Determine background polarity (light vs dark) from perimeter and majority pixels
+        const allPixels = [...insidePixels, ...perimPixels];
+        const sortedByLum = [...allPixels].sort((a, b) => a.lum - b.lum);
+        const medianLum = sortedByLum[Math.floor(sortedByLum.length / 2)].lum;
+        const bgIsLight = medianLum > 0.45;
+
+        // 4. Extract text colour from darkest or lightest cluster inside box
+        const insideSorted = [...insidePixels].sort((a, b) => a.lum - b.lum);
+        const textClusterSize = Math.max(2, Math.floor(insideSorted.length * 0.10));
+        const textCluster = bgIsLight
+          ? insideSorted.slice(0, textClusterSize)
+          : insideSorted.slice(Math.max(0, insideSorted.length - textClusterSize));
+
+        const textR = median(textCluster.map(p => p.r));
+        const textG = median(textCluster.map(p => p.g));
+        const textB = median(textCluster.map(p => p.b));
+        const textHex = rgbToHex(textR, textG, textB);
+        const textLum = getRelativeLuminance(textR, textG, textB);
+
+        // 5. Extract background colour separately for each box
+        const bgCluster = bgIsLight
+          ? [...perimPixels, ...insideSorted.slice(Math.floor(insideSorted.length * 0.6))]
+          : [...perimPixels, ...insideSorted.slice(0, Math.floor(insideSorted.length * 0.4))];
+
+        const bgR = median(bgCluster.map(p => p.r));
+        const bgG = median(bgCluster.map(p => p.g));
+        const bgB = median(bgCluster.map(p => p.b));
+        const bgHex = rgbToHex(bgR, bgG, bgB);
+        const bgLum = getRelativeLuminance(bgR, bgG, bgB);
+
+        // 6. Check if background varies a lot inside / around box (e.g. gradient)
+        const numSections = 3;
+        const sectionBgLums = [];
+        const sectionWidth = Math.floor(width / numSections);
+        for (let s = 0; s < numSections; s++) {
+          const sLeft = left + s * sectionWidth;
+          const sRight = (s === numSections - 1) ? (left + width) : (sLeft + sectionWidth);
+          const sPixels = insidePixels.filter(p => p.x >= sLeft && p.x < sRight);
+          const sSorted = [...sPixels].sort((a, b) => a.lum - b.lum);
+          const sBg = bgIsLight
+            ? sSorted.slice(Math.floor(sSorted.length * 0.7))
+            : sSorted.slice(0, Math.max(1, Math.floor(sSorted.length * 0.3)));
+          if (sBg.length) {
+            const sBgR = median(sBg.map(p => p.r));
+            const sBgG = median(sBg.map(p => p.g));
+            const sBgB = median(sBg.map(p => p.b));
+            sectionBgLums.push(getRelativeLuminance(sBgR, sBgG, sBgB));
+          }
         }
+        const bgSectionDiff = sectionBgLums.length > 1
+          ? Math.max(...sectionBgLums) - Math.min(...sectionBgLums)
+          : 0;
 
-        const fgHex = clusters.textHex;
-        const bgHex = clusters.bgHex;
-        const bgLum = getRelativeLuminance(...clusters.bgRgb);
+        const perimLums = perimPixels.map(p => p.lum);
+        const perimMean = perimLums.reduce((s, v) => s + v, 0) / (perimLums.length || 1);
+        const perimStdDev = Math.sqrt(perimLums.reduce((s, v) => s + Math.pow(v - perimMean, 2), 0) / (perimLums.length || 1));
 
-        // Item 3: Extend box width using column pixel analysis
-        if (rawImageBuffer) {
-          extendRegionToTextExtent(region, rawImageBuffer, imgWidth, imgHeight, bgLum);
-        }
+        const isApproximate = bgSectionDiff > 0.15 || perimStdDev > 0.12;
 
-        const ratio = getContrastRatio(clusters.textRgb, clusters.bgRgb);
+        const lighter = Math.max(textLum, bgLum);
+        const darker = Math.min(textLum, bgLum);
+        const ratio = (lighter + 0.05) / (darker + 0.05);
         const ratioNum = Number(ratio.toFixed(2));
-        const passesContrast = ratioNum >= minContrastRatio;
+        const passesContrast = isApproximate ? null : (ratioNum >= minContrastRatio);
 
         region.contrastRatio = ratioNum;
-        region.fgColor = fgHex;
+        region.fgColor = textHex;
         region.bgColor = bgHex;
-        region.calculationType = "computed";
+        region.calculationType = isApproximate ? "approximate" : "computed";
+        region.isApproximate = isApproximate;
         region.passesContrast = passesContrast;
 
         contrastResults.push({
           text: region.text,
           measured: true,
-          calculationType: "computed",
+          calculationType: isApproximate ? "approximate" : "computed",
+          isApproximate,
           ratio: ratioNum,
           requiredRatio: minContrastRatio,
-          foregroundHex: fgHex,
+          foregroundHex: textHex,
           backgroundHex: bgHex,
           passes: passesContrast
         });
 
-        if (ratio < minContrastRatio) {
+        if (!isApproximate && ratioNum < minContrastRatio) {
           contrastFindings.push({
             id: `finding-contrast-${Date.now()}-${i}`,
             rule_id: "V-01",
             quote: region.text,
             category: "accessibility",
             severity: "high",
-            explanation: `Text contrast ratio is ${ratio.toFixed(2)}:1 (foreground ${fgHex}, background ${bgHex}), which fails the minimum required ${minContrastRatio}:1 (WCAG AA). [computed]`,
-            suggested_fix: `Change text colour (${fgHex}) to meet at least ${minContrastRatio}:1 minimum contrast ratio against background (${bgHex}).`,
+            explanation: `Text contrast ratio is ${ratioNum}:1 (foreground ${textHex}, background ${bgHex}), which fails the minimum required ${minContrastRatio}:1 (WCAG AA). [computed]`,
+            suggested_fix: `Change text colour (${textHex}) to meet at least ${minContrastRatio}:1 minimum contrast ratio against background (${bgHex}).`,
             needs_human_judgement: true,
             source: "contrast",
             measured_ratio: ratioNum,
-            foreground_hex: fgHex,
+            foreground_hex: textHex,
             background_hex: bgHex,
+            status: "pending"
+          });
+        } else if (isApproximate && ratioNum < minContrastRatio) {
+          contrastFindings.push({
+            id: `finding-contrast-${Date.now()}-${i}`,
+            rule_id: "V-01",
+            quote: region.text,
+            category: "accessibility",
+            severity: "medium",
+            explanation: `Text contrast ratio is approximately ${ratioNum}:1 (foreground ${textHex}, background ${bgHex}) over a variable or gradient background. [approximate]`,
+            suggested_fix: `Ensure text colour (${textHex}) maintains sufficient contrast across the gradient background.`,
+            needs_human_judgement: true,
+            source: "contrast",
+            measured_ratio: ratioNum,
+            foreground_hex: textHex,
+            background_hex: bgHex,
+            is_approximate: true,
             status: "pending"
           });
         }

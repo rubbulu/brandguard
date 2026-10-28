@@ -1045,7 +1045,8 @@ export default function App() {
                   ((f.quote && regText && f.quote.toLowerCase().includes(regText.toLowerCase())) ||
                     (f.explanation && regText && f.explanation.includes(regText)))
               );
-            const hasContrastFail = reg.passesContrast === false || (measuredRatio !== null && measuredRatio < (visualSettings?.minContrastRatio || 4.5));
+            const isApprox = reg.isApproximate || reg.calculationType === "approximate";
+            const hasContrastFail = !isApprox && (reg.passesContrast === false || (measuredRatio !== null && measuredRatio < (visualSettings?.minContrastRatio || 4.5)));
 
             return (
               <div
@@ -1062,18 +1063,22 @@ export default function App() {
                 className={`cursor-pointer transition-all border-2 rounded-xs ${
                   isHovered || isFindingSelected
                     ? "border-blue-500 bg-blue-500/30 ring-2 ring-blue-400 z-30"
+                    : isApprox
+                    ? "border-amber-400 bg-amber-400/20 z-10"
                     : hasContrastFail
                     ? "border-red-500 bg-red-500/20 z-10"
                     : "border-emerald-400 bg-emerald-400/10 z-10"
                 }`}
-                title={`Region #${idx + 1}: "${regText}" (${measuredRatio ? measuredRatio + ':1' : 'could not measure'})`}
+                title={`Region #${idx + 1}: "${regText}" (${isApprox ? '~' + measuredRatio + ':1 (approximate)' : measuredRatio ? measuredRatio + ':1' : 'could not measure'})`}
               >
                 <span
                   className={`absolute -top-4 left-0 text-[9px] font-bold px-1 rounded font-mono shadow-xs ${
-                    hasContrastFail ? "bg-red-600 text-white" : "bg-emerald-700 text-white"
+                    isApprox
+                      ? "bg-amber-600 text-white"
+                      : hasContrastFail ? "bg-red-600 text-white" : "bg-emerald-700 text-white"
                   }`}
                 >
-                  #{idx + 1} {measuredRatio ? `${measuredRatio}:1` : ""}
+                  #{idx + 1} {measuredRatio ? `${isApprox ? '~' : ''}${measuredRatio}:1` : ""}
                 </span>
               </div>
             );
@@ -1173,8 +1178,9 @@ export default function App() {
               {draft.regions.map((reg, idx) => {
                 if (!reg) return null;
                 const measuredRatio = reg.contrastRatio || (reg.fgColor && reg.bgColor ? calcContrast(reg.fgColor, reg.bgColor) : null);
-                const calcType = reg.calculationType || (measuredRatio ? "computed" : "estimated");
-                const isPassed = measuredRatio !== null ? measuredRatio >= (visualSettings?.minContrastRatio || 4.5) : false;
+                const isApprox = reg.isApproximate || reg.calculationType === "approximate";
+                const calcType = reg.calculationType || (isApprox ? "approximate" : measuredRatio ? "computed" : "estimated");
+                const isPassed = !isApprox && (measuredRatio !== null ? measuredRatio >= (visualSettings?.minContrastRatio || 4.5) : false);
                 const isHovered = hoveredRegionIdx === idx;
                 const regText = typeof reg.text === "string" ? reg.text : "";
 
@@ -1186,6 +1192,8 @@ export default function App() {
                     className={`p-2.5 rounded-xl border text-xs transition-all ${
                       isHovered
                         ? "border-blue-500 bg-blue-50/50"
+                        : isApprox
+                        ? "border-amber-200 bg-amber-50/40"
                         : isPassed
                         ? "border-slate-200 bg-slate-50/60"
                         : "border-red-200 bg-red-50/40"
@@ -1201,15 +1209,19 @@ export default function App() {
 
                       <div className="flex items-center gap-1.5">
                         <span className="text-[10px] text-slate-400 font-mono">
-                          {calcType === "computed" ? "[computed]" : "[estimated]"}
+                          {isApprox ? "[approximate]" : calcType === "computed" ? "[computed]" : "[estimated]"}
                         </span>
                         {measuredRatio ? (
                           <span
                             className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                              isPassed ? "bg-emerald-100 text-emerald-800" : "bg-red-100 text-red-800 font-extrabold"
+                              isApprox
+                                ? "bg-amber-100 text-amber-800 font-bold"
+                                : isPassed ? "bg-emerald-100 text-emerald-800" : "bg-red-100 text-red-800 font-extrabold"
                             }`}
                           >
-                            {measuredRatio}:1 {isPassed ? "✓ Pass" : "✕ Fail"}
+                            {isApprox
+                              ? `~${measuredRatio}:1 Approximate`
+                              : `${measuredRatio}:1 ${isPassed ? "✓ Pass" : "✕ Fail"}`}
                           </span>
                         ) : (
                           <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">
