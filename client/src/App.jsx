@@ -90,25 +90,9 @@ export default function App() {
     const isVerify = window.location.pathname.startsWith("/verify/") || rawHash.startsWith("#/verify/");
     return isNoHash && !isVerify;
   });
-  const isFirstScreenWelcomeRef = useRef(
-    typeof window !== "undefined" &&
-    (!window.location.hash || window.location.hash === "#" || window.location.hash === "#/") &&
-    !window.location.pathname.startsWith("/verify/")
-  );
 
   const handleCloseGuideModal = () => {
     setShowGuideModal(false);
-    if (
-      isFirstScreenWelcomeRef.current ||
-      activeRole === "manager" ||
-      !window.location.hash ||
-      window.location.hash === "#" ||
-      window.location.hash === "#/" ||
-      window.location.hash === "#/manager"
-    ) {
-      changeRole("manager");
-    }
-    isFirstScreenWelcomeRef.current = false;
   };
 
   // Brand Library State
@@ -238,7 +222,6 @@ export default function App() {
     if (isNoHash && !window.location.pathname.startsWith("/verify/")) {
       changeRole("manager");
       setShowGuideModal(true);
-      isFirstScreenWelcomeRef.current = true;
     }
     return () => {
       window.removeEventListener("hashchange", handleUrlChange);
@@ -591,7 +574,7 @@ export default function App() {
   };
 
   // Quick Test Draft Selection & Demo Scenario
-  const handleLoadDemoScenario = () => {
+  const handleLoadDemoScenario = (shouldNavigate = true) => {
     const campusPro = sampleDrafts.find((s) => s.id === "sample-1") || {
       title: "CampusPro Launch Announcement",
       content: "Meet CampusPro, India's fastest laptop for students! Its battery lasts 3 days. Buy now!!"
@@ -600,7 +583,9 @@ export default function App() {
     setDraftContent(campusPro.content);
     setReviewError(null);
     setSelectedSampleDraftId("");
-    changeRole("creator");
+    if (shouldNavigate !== false) {
+      changeRole("creator");
+    }
   };
 
   const handleSelectSample = (sample) => {
@@ -1596,10 +1581,7 @@ export default function App() {
             </button>
 
             <button
-              onClick={() => {
-                isFirstScreenWelcomeRef.current = false;
-                setShowGuideModal(true);
-              }}
+              onClick={() => setShowGuideModal(true)}
               className="px-2.5 py-1.5 rounded-lg border border-blue-200 bg-blue-50 text-xs font-bold text-blue-700 hover:bg-blue-100 flex items-center gap-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
               <HelpCircle className="w-3.5 h-3.5" />
@@ -3628,10 +3610,10 @@ export default function App() {
                 Close
               </button>
               <button
+                type="button"
                 onClick={() => {
-                  isFirstScreenWelcomeRef.current = false;
                   setShowGuideModal(false);
-                  handleLoadDemoScenario();
+                  handleLoadDemoScenario(false);
                 }}
                 className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
