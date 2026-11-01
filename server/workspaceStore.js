@@ -1,7 +1,13 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { INITIAL_RULES, INITIAL_FACTS, INITIAL_VISUAL_SETTINGS } from "./demoData.js";
+import {
+  INITIAL_RULES,
+  INITIAL_FACTS,
+  INITIAL_VISUAL_SETTINGS,
+  INITIAL_TONE_PROFILES,
+  INITIAL_BRAND_TERMS
+} from "./demoData.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -43,6 +49,8 @@ export function getInitialWorkspaceData(workspaceId) {
     rules: JSON.parse(JSON.stringify(INITIAL_RULES)),
     facts: JSON.parse(JSON.stringify(INITIAL_FACTS)),
     visualSettings: JSON.parse(JSON.stringify(INITIAL_VISUAL_SETTINGS)),
+    toneProfiles: JSON.parse(JSON.stringify(INITIAL_TONE_PROFILES)),
+    brandTerms: [...INITIAL_BRAND_TERMS],
     drafts: [] // Fresh visitor starts with NO drafts, NO comments, empty audit trail
   };
 }
@@ -57,9 +65,29 @@ export function loadWorkspace(workspaceId) {
       const data = JSON.parse(content);
       // Ensure required collections exist
       if (!Array.isArray(data.rules)) data.rules = JSON.parse(JSON.stringify(INITIAL_RULES));
+      // Ensure T-06 is present in rules if not already
+      if (!data.rules.some(r => r.id === "T-06")) {
+        const t06Rule = INITIAL_RULES.find(r => r.id === "T-06");
+        if (t06Rule) data.rules.push({ ...t06Rule });
+      }
       if (!Array.isArray(data.facts)) data.facts = JSON.parse(JSON.stringify(INITIAL_FACTS));
       if (!Array.isArray(data.drafts)) data.drafts = [];
       if (!data.visualSettings) data.visualSettings = JSON.parse(JSON.stringify(INITIAL_VISUAL_SETTINGS));
+
+      // Migration for existing workspaces lacking toneProfiles or brandTerms
+      if (!data.toneProfiles || typeof data.toneProfiles !== "object") {
+        data.toneProfiles = JSON.parse(JSON.stringify(INITIAL_TONE_PROFILES));
+      } else {
+        for (const [ch, prof] of Object.entries(INITIAL_TONE_PROFILES)) {
+          if (!data.toneProfiles[ch]) {
+            data.toneProfiles[ch] = { ...prof };
+          }
+        }
+      }
+      if (!Array.isArray(data.brandTerms)) {
+        data.brandTerms = [...INITIAL_BRAND_TERMS];
+      }
+
       return data;
     }
   } catch (err) {

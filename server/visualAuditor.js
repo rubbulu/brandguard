@@ -545,6 +545,9 @@ export async function runVisualAudit({
   visualSettings = {},
   rules = [],
   facts = [],
+  brandTerms = ["CampusPro"],
+  toneProfiles = null,
+  channel = "Ad Copy / Banner",
   apiKey,
   workspaceId,
   onStage
@@ -1219,7 +1222,8 @@ export async function runVisualAudit({
 
     let rejectedList = [];
     if (needsFullValidation) {
-      const validated = validateFindings(extractedText, rawAiFindings, activeRules, facts);
+      const bannerProfile = (toneProfiles && toneProfiles[channel]) || (toneProfiles && toneProfiles["Ad Copy / Banner"]);
+      const validated = validateFindings(extractedText, rawAiFindings, activeRules, facts, brandTerms, channel, bannerProfile);
       droppedTextCount = validated.rejected.length;
       rejectedList = [...validated.rejected];
       for (const f of validated.accepted) {

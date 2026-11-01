@@ -3,9 +3,16 @@ import cors from "cors";
 import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
-import { INITIAL_RULES, INITIAL_FACTS, SAMPLE_DRAFTS, INITIAL_VISUAL_SETTINGS } from "./demoData.js";
+import {
+  INITIAL_RULES,
+  INITIAL_FACTS,
+  SAMPLE_DRAFTS,
+  INITIAL_VISUAL_SETTINGS,
+  INITIAL_TONE_PROFILES,
+  INITIAL_BRAND_TERMS
+} from "./demoData.js";
 import { callGeminiReview, ACTIVE_MODEL } from "./geminiService.js";
-import { validateFindings } from "./validator.js";
+import { validateFindings, compareChannelTones, resolveChannelProfile } from "./validator.js";
 import { loadWorkspace, saveWorkspace, resetWorkspace } from "./workspaceStore.js";
 import { runVisualAudit, clearVisualAuditCache } from "./visualAuditor.js";
 import { detectPromptInjection } from "./securityScanner.js";
@@ -235,6 +242,107 @@ app.put(["/api/visual-settings", "/visual-settings"], (req, res) => {
   });
 });
 
+// --- 3c. Tone Profiles & Brand Terms ---
+app.get("/api/tone-settings", (req, res) => {
+  res.json({
+    toneProfiles: req.workspace.toneProfiles || INITIAL_TONE_PROFILES,
+    brandTerms: req.workspace.brandTerms || INITIAL_BRAND_TERMS
+  });
+});
+
+app.put("/api/tone-settings", (req, res) => {
+  const { toneProfiles, brandTerms } = req.body;
+
+  if (!toneProfiles || typeof toneProfiles !== "object") {
+    return res.status(400).json({ error: "toneProfiles object is required." });
+  }
+
+  const standardChannels = [
+    "Social Media / Twitter",
+    "Marketing Email",
+    "Product Landing Page",
+    "Ad Copy / Banner"
+  ];
+
+  const validatedProfiles = {};
+  for (const ch of standardChannels) {
+    const prof = toneProfiles[ch];
+    if (!prof || typeof prof !== "object") {
+      return res.status(400).json({ error: `Missing tone profile for channel "${ch}".` });
+    }
+
+    const maxEx = Number(prof.maxExclamationMarks);
+    const maxCaps = Number(prof.maxAllCapsWords);
+    const maxChars = Number(prof.maxCharacters);
+
+    if (isNaN(maxEx) || !Number.isInteger(maxEx) || maxEx < 0 || maxEx > 1000) {
+      return res.status(400).json({ error: `Max Exclamation Marks for "${ch}" must be a whole number between 0 and 1000.` });
+    }
+    if (isNaN(maxCaps) || !Number.isInteger(maxCaps) || maxCaps < 0 || maxCaps > 1000) {
+      return res.status(400).json({ error: `Max ALL-CAPS Words for "${ch}" must be a whole number between 0 and 1000.` });
+    }
+    if (isNaN(maxChars) || !Number.isInteger(maxChars) || maxChars < 0 || maxChars > 1000) {
+      return res.status(400).json({ error: `Max Characters for "${ch}" must be a whole number between 0 and 1000 (0 = no limit).` });
+    }
+
+    validatedProfiles[ch] = {
+      maxExclamationMarks: maxEx,
+      maxAllCapsWords: maxCaps,
+      maxCharacters: maxChars
+    };
+  }
+
+  let cleanBrandTerms = req.workspace.brandTerms || [...INITIAL_BRAND_TERMS];
+  if (Array.isArray(brandTerms)) {
+    cleanBrandTerms = brandTerms
+      .map(t => (typeof t === "string" ? t.trim() : ""))
+      .filter(Boolean);
+    if (cleanBrandTerms.length === 0) {
+      return res.status(400).json({ error: "At least one brand term is required." });
+    }
+  }
+
+  req.workspace.toneProfiles = validatedProfiles;
+  req.workspace.brandTerms = cleanBrandTerms;
+  req.saveWs();
+
+  res.json({
+    message: "Tone profiles and brand terms updated successfully.",
+    toneProfiles: req.workspace.toneProfiles,
+    brandTerms: req.workspace.brandTerms
+  });
+});
+
+app.post("/api/tone-settings/reset", (req, res) => {
+  req.workspace.toneProfiles = JSON.parse(JSON.stringify(INITIAL_TONE_PROFILES));
+  req.workspace.brandTerms = [...INITIAL_BRAND_TERMS];
+  req.saveWs();
+  res.json({
+    message: "Tone profiles restored to default settings.",
+    toneProfiles: req.workspace.toneProfiles,
+    brandTerms: req.workspace.brandTerms
+  });
+});
+
+app.post("/api/compare-channels", (req, res) => {
+  const { draftText } = req.body;
+  if (!draftText || typeof draftText !== "string" || !draftText.trim()) {
+    return res.status(400).json({ error: "Draft text is required to compare channels." });
+  }
+
+  const comparison = compareChannelTones(
+    draftText.trim(),
+    req.workspace.rules || [],
+    req.workspace.brandTerms || INITIAL_BRAND_TERMS,
+    req.workspace.toneProfiles || INITIAL_TONE_PROFILES
+  );
+
+  res.json({
+    draftText: draftText.trim(),
+    channels: comparison
+  });
+});
+
 // --- 4. Workspace Reset & Sample Drafts ---
 app.post("/api/reset-workspace", (req, res) => {
   const fresh = resetWorkspace(req.workspaceId);
@@ -312,7 +420,7 @@ app.post(["/api/review", "/review"], async (req, res) => {
   };
 
   try {
-    const { draftId, draftText } = req.body;
+    const { draftId, draftText, channel: bodyChannel } = req.body;
 
     // Enforce rate limit per workspace
     if (!checkRateLimit(req.workspaceId)) {
@@ -334,6 +442,11 @@ app.post(["/api/review", "/review"], async (req, res) => {
         textToReview = targetDraft.currentText || targetDraft.originalText;
       }
     }
+
+    const channel = bodyChannel || targetDraft?.channel || "Social Media / Twitter";
+    const toneProfiles = req.workspace.toneProfiles || INITIAL_TONE_PROFILES;
+    const brandTerms = req.workspace.brandTerms || INITIAL_BRAND_TERMS;
+    const { profile: targetProfile } = resolveChannelProfile(channel, toneProfiles);
 
     if (!textToReview || textToReview.trim() === "") {
       if (isStream) {
@@ -374,13 +487,16 @@ app.post(["/api/review", "/review"], async (req, res) => {
 
     sendStage("deterministic", "Deterministic tone checks");
 
-    // 3. Run the deterministic Validator
+    // 3. Run the deterministic Validator with workspace tone profile and brand terms
     sendStage("validator", "Validator governance & deduplication");
     const validationResult = validateFindings(
       textToReview,
       rawAiFindings,
       req.workspace.rules,
-      req.workspace.facts
+      req.workspace.facts,
+      brandTerms,
+      channel,
+      targetProfile
     );
 
     // 4. Prepend prompt injection findings (they can never be suppressed by AI verdicts)
@@ -502,6 +618,9 @@ app.post(["/api/visual-review", "/visual-review"], async (req, res) => {
       visualSettings: req.workspace.visualSettings,
       rules: req.workspace.rules,
       facts: req.workspace.facts,
+      brandTerms: req.workspace.brandTerms,
+      toneProfiles: req.workspace.toneProfiles,
+      channel: channel || "Ad Copy / Banner",
       apiKey: GEMINI_API_KEY,
       workspaceId: req.workspaceId,
       onStage: sendStage

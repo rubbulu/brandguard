@@ -28,7 +28,8 @@ import {
   Palette,
   Eye,
   Upload,
-  Trash2
+  Trash2,
+  Sliders
 } from "lucide-react";
 import RedlineDiff from "./components/RedlineDiff";
 import ComplianceCertificate from "./components/ComplianceCertificate";
@@ -113,6 +114,23 @@ export default function App() {
     ]
   });
   const [newColorHex, setNewColorHex] = useState("#2563EB");
+
+  // Tone Profiles & Brand Terms State (Brand Manager)
+  const [toneProfiles, setToneProfiles] = useState({
+    "Social Media / Twitter": { maxExclamationMarks: 1, maxAllCapsWords: 0, maxCharacters: 280 },
+    "Marketing Email": { maxExclamationMarks: 2, maxAllCapsWords: 2, maxCharacters: 0 },
+    "Product Landing Page": { maxExclamationMarks: 2, maxAllCapsWords: 2, maxCharacters: 0 },
+    "Ad Copy / Banner": { maxExclamationMarks: 1, maxAllCapsWords: 0, maxCharacters: 120 }
+  });
+  const [brandTermsText, setBrandTermsText] = useState("CampusPro");
+  const [toneSettingsError, setToneSettingsError] = useState(null);
+  const [isSavingToneSettings, setIsSavingToneSettings] = useState(false);
+
+  // Compare Channels State (Content Creator)
+  const [showCompareModal, setShowCompareModal] = useState(false);
+  const [compareResults, setCompareResults] = useState(null);
+  const [isComparingChannels, setIsComparingChannels] = useState(false);
+  const [compareNotice, setCompareNotice] = useState(null);
 
   // Creator & Review State (Text)
   const [draftTitle, setDraftTitle] = useState("");
@@ -266,13 +284,14 @@ export default function App() {
 
   const loadWorkspaceData = async () => {
     try {
-      const [rulesRes, factsRes, samplesRes, draftsRes, insightsRes, visualRes] = await Promise.all([
+      const [rulesRes, factsRes, samplesRes, draftsRes, insightsRes, visualRes, toneRes] = await Promise.all([
         wsFetch("/api/rules"),
         wsFetch("/api/facts"),
         wsFetch("/api/sample-drafts"),
         wsFetch("/api/drafts"),
         wsFetch("/api/insights"),
-        wsFetch("/api/visual-settings")
+        wsFetch("/api/visual-settings"),
+        wsFetch("/api/tone-settings")
       ]);
 
       if (rulesRes.ok) setRules(await rulesRes.json());
@@ -295,6 +314,11 @@ export default function App() {
       }
       if (insightsRes.ok) setInsights(await insightsRes.json());
       if (visualRes && visualRes.ok) setVisualSettings(await visualRes.json());
+      if (toneRes && toneRes.ok) {
+        const toneData = await toneRes.json();
+        if (toneData.toneProfiles) setToneProfiles(toneData.toneProfiles);
+        if (Array.isArray(toneData.brandTerms)) setBrandTermsText(toneData.brandTerms.join(", "));
+      }
     } catch (e) {
       console.error("Error loading workspace data", e);
     }
@@ -315,6 +339,120 @@ export default function App() {
       }
     } catch (e) {
       console.error("Failed to save visual settings", e);
+    }
+  };
+
+  // Save Brand Tone Settings (T-03, T-05, T-06)
+  const handleSaveToneSettings = async (e) => {
+    if (e) e.preventDefault();
+    setToneSettingsError(null);
+
+    const standardChannels = [
+      "Social Media / Twitter",
+      "Marketing Email",
+      "Product Landing Page",
+      "Ad Copy / Banner"
+    ];
+
+    for (const ch of standardChannels) {
+      const p = toneProfiles[ch];
+      if (!p) {
+        setToneSettingsError(`Missing settings for ${ch}.`);
+        return;
+      }
+      const ex = Number(p.maxExclamationMarks);
+      const caps = Number(p.maxAllCapsWords);
+      const chars = Number(p.maxCharacters);
+
+      if (
+        p.maxExclamationMarks === "" || isNaN(ex) || !Number.isInteger(ex) || ex < 0 || ex > 1000 ||
+        p.maxAllCapsWords === "" || isNaN(caps) || !Number.isInteger(caps) || caps < 0 || caps > 1000 ||
+        p.maxCharacters === "" || isNaN(chars) || !Number.isInteger(chars) || chars < 0 || chars > 1000
+      ) {
+        setToneSettingsError(`Limits for "${ch}" must be whole numbers between 0 and 1000. Blank values are not permitted.`);
+        return;
+      }
+    }
+
+    const brandTerms = brandTermsText
+      .split(/[,;\n]+/)
+      .map(t => t.trim())
+      .filter(Boolean);
+
+    if (brandTerms.length === 0) {
+      setToneSettingsError("Please provide at least one exempt brand term (e.g. CampusPro).");
+      return;
+    }
+
+    setIsSavingToneSettings(true);
+    try {
+      const res = await wsFetch("/api/tone-settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ toneProfiles, brandTerms })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setToneProfiles(data.toneProfiles);
+        setBrandTermsText(data.brandTerms.join(", "));
+        showNotice("Tone profiles and brand terms saved successfully.");
+      } else {
+        const err = await res.json();
+        setToneSettingsError(err.error || "Failed to save tone settings.");
+      }
+    } catch (e) {
+      setToneSettingsError("Network error while saving tone settings.");
+    } finally {
+      setIsSavingToneSettings(false);
+    }
+  };
+
+  // Reset Tone Settings to Defaults
+  const handleResetToneSettings = async () => {
+    setToneSettingsError(null);
+    try {
+      const res = await wsFetch("/api/tone-settings/reset", { method: "POST" });
+      if (res.ok) {
+        const data = await res.json();
+        setToneProfiles(data.toneProfiles);
+        setBrandTermsText(data.brandTerms.join(", "));
+        showNotice("Tone profiles restored to default settings.");
+      }
+    } catch (e) {
+      setToneSettingsError("Failed to reset tone settings.");
+    }
+  };
+
+  // Compare Deterministic Tone Checks Across All 4 Channels
+  const handleCompareChannels = async () => {
+    if (!draftContent || !draftContent.trim()) {
+      setCompareNotice("Please enter or select draft copy first to compare channel tone profiles.");
+      setShowCompareModal(true);
+      setCompareResults(null);
+      return;
+    }
+
+    setCompareNotice(null);
+    setIsComparingChannels(true);
+    setShowCompareModal(true);
+
+    try {
+      const res = await wsFetch("/api/compare-channels", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ draftText: draftContent.trim() })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setCompareResults(data.channels);
+      } else {
+        const err = await res.json();
+        setCompareNotice(err.error || "Failed to compare channels.");
+      }
+    } catch (e) {
+      setCompareNotice("Error connecting to server to compare channels.");
+    } finally {
+      setIsComparingChannels(false);
     }
   };
 
@@ -639,7 +777,8 @@ export default function App() {
         headers: { "Content-Type": "application/json", "x-stream": "true" },
         body: JSON.stringify({
           draftId: newDraft.id,
-          draftText: draftContent.trim()
+          draftText: draftContent.trim(),
+          channel: draftChannel
         })
       });
 
@@ -2027,6 +2166,162 @@ export default function App() {
                 </div>
               </div>
             </div>
+
+            {/* Tone Profiles & Brand Terms */}
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
+              <div className="p-4 sm:p-5 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <h2 className="font-bold text-slate-900 text-base flex items-center gap-2">
+                    <Sliders className="w-4 h-4 text-blue-600" />
+                    Channel Tone Profiles &amp; Brand Terms
+                  </h2>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Rule-based tone settings per channel, allowing the same copy to be judged differently across Twitter, Email, Landing Pages, and Banners.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleResetToneSettings}
+                    className="px-3 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-bold transition-all flex items-center gap-1.5 focus:outline-none focus:ring-2 focus:ring-slate-300"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    Reset to Defaults
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSaveToneSettings}
+                    disabled={isSavingToneSettings}
+                    className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                  >
+                    {isSavingToneSettings ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                    Save Tone Profiles
+                  </button>
+                </div>
+              </div>
+
+              {toneSettingsError && (
+                <div className="mx-4 sm:mx-6 mt-4 p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs font-medium flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0 text-red-600" />
+                  <span>{toneSettingsError}</span>
+                </div>
+              )}
+
+              <div className="p-4 sm:p-6 space-y-6">
+                {/* Table of channels */}
+                <div className="overflow-x-auto border border-slate-100 rounded-xl">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="bg-slate-50 border-b border-slate-100 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
+                        <th className="py-2.5 px-4">Target Channel</th>
+                        <th className="py-2.5 px-4">Max Exclamations (T-03)</th>
+                        <th className="py-2.5 px-4">Max ALL-CAPS Words (T-05)</th>
+                        <th className="py-2.5 px-4">Max Characters (T-06)</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {[
+                        "Social Media / Twitter",
+                        "Marketing Email",
+                        "Product Landing Page",
+                        "Ad Copy / Banner"
+                      ].map((channelKey) => {
+                        const prof = toneProfiles[channelKey] || { maxExclamationMarks: 1, maxAllCapsWords: 0, maxCharacters: 0 };
+                        return (
+                          <tr key={channelKey} className="hover:bg-slate-50/50 transition-colors">
+                            <td className="py-3 px-4 font-bold text-slate-900">
+                              {channelKey}
+                            </td>
+                            <td className="py-3 px-4">
+                              <div className="flex items-center gap-2">
+                                <input
+                                  type="number"
+                                  min="0"
+                                  max="1000"
+                                  step="1"
+                                  value={prof.maxExclamationMarks}
+                                  onChange={(e) => {
+                                    const val = e.target.value;
+                                    setToneProfiles(prev => ({
+                                      ...prev,
+                                      [channelKey]: { ...prev[channelKey], maxExclamationMarks: val }
+                                    }));
+                                  }}
+                                  className="w-20 px-2.5 py-1.5 text-xs rounded-lg border border-slate-200 bg-white font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                  required
+                                />
+                                <span className="text-[11px] text-slate-400">marks</span>
+                              </div>
+                            </td>
+                            <td className="py-3 px-4">
+                              <div className="flex items-center gap-2">
+                                <input
+                                  type="number"
+                                  min="0"
+                                  max="1000"
+                                  step="1"
+                                  value={prof.maxAllCapsWords}
+                                  onChange={(e) => {
+                                    const val = e.target.value;
+                                    setToneProfiles(prev => ({
+                                      ...prev,
+                                      [channelKey]: { ...prev[channelKey], maxAllCapsWords: val }
+                                    }));
+                                  }}
+                                  className="w-20 px-2.5 py-1.5 text-xs rounded-lg border border-slate-200 bg-white font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                  required
+                                />
+                                <span className="text-[11px] text-slate-400">words</span>
+                              </div>
+                            </td>
+                            <td className="py-3 px-4">
+                              <div className="flex items-center gap-2">
+                                <input
+                                  type="number"
+                                  min="0"
+                                  max="1000"
+                                  step="1"
+                                  value={prof.maxCharacters}
+                                  onChange={(e) => {
+                                    const val = e.target.value;
+                                    setToneProfiles(prev => ({
+                                      ...prev,
+                                      [channelKey]: { ...prev[channelKey], maxCharacters: val }
+                                    }));
+                                  }}
+                                  className="w-24 px-2.5 py-1.5 text-xs rounded-lg border border-slate-200 bg-white font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                  required
+                                />
+                                <span className="text-[11px] text-slate-400">
+                                  {Number(prof.maxCharacters) === 0 ? "(0 = no limit)" : "chars"}
+                                </span>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Brand Terms Input */}
+                <div className="bg-slate-50 p-4 rounded-xl border border-slate-100 space-y-2">
+                  <label className="block text-xs font-bold text-slate-800">
+                    Exempt Brand Terms &amp; Approved Acronyms
+                  </label>
+                  <p className="text-[11px] text-slate-500">
+                    Words, brand names, or approved acronyms listed here are exempted from all-caps (T-05) tone violations (comma or newline separated).
+                  </p>
+                  <input
+                    type="text"
+                    value={brandTermsText}
+                    onChange={(e) => setBrandTermsText(e.target.value)}
+                    placeholder="e.g. CampusPro, AI, AGY, RAM"
+                    className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 bg-white font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+              </div>
+            </div>
           </div>
         )}
 
@@ -2104,6 +2399,16 @@ export default function App() {
                     >
                       <Sparkles className="w-3.5 h-3.5" />
                       Load Demo Scenario
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleCompareChannels}
+                      className="px-3 py-1.5 bg-purple-50 border border-purple-200 text-purple-700 hover:bg-purple-100 rounded-lg text-xs font-bold flex items-center gap-1.5 focus:outline-none focus:ring-2 focus:ring-purple-500 transition-all shadow-2xs"
+                      title="Compare tone rules (T-03, T-05, T-06) across all 4 channels instantly"
+                    >
+                      <Sliders className="w-3.5 h-3.5" />
+                      <span>Compare Channels</span>
                     </button>
 
                     <select
@@ -3619,6 +3924,157 @@ export default function App() {
               >
                 <span>Start the tour</span>
                 <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Compare Channels Modal (Deterministic multi-channel check) */}
+      {showCompareModal && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="compare-modal-title"
+          onClick={() => setShowCompareModal(false)}
+          className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4 animate-fade-in"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") setShowCompareModal(false);
+            }}
+            tabIndex={-1}
+            className="bg-white rounded-2xl max-w-3xl w-full p-6 shadow-2xl border border-slate-200 space-y-5 focus:outline-none max-h-[90vh] overflow-y-auto"
+          >
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-xl bg-purple-100 text-purple-700 flex items-center justify-center">
+                  <Sliders className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 id="compare-modal-title" className="font-extrabold text-slate-900 text-base">
+                    Channel Tone Profiles Comparison
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Deterministic code checks (T-03, T-05, T-06) across all 4 channels without AI calls
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowCompareModal(false)}
+                className="text-slate-400 hover:text-slate-700 p-1.5 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
+                aria-label="Close compare modal"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {compareNotice && (
+              <div className="p-3.5 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl text-xs flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0 text-amber-600" />
+                <span>{compareNotice}</span>
+              </div>
+            )}
+
+            {isComparingChannels ? (
+              <div className="py-12 flex flex-col items-center justify-center gap-3 text-slate-500">
+                <RefreshCw className="w-6 h-6 animate-spin text-purple-600" />
+                <span className="text-xs font-semibold">Running deterministic channel checks...</span>
+              </div>
+            ) : compareResults ? (
+              <div className="space-y-4">
+                <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl">
+                  <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block mb-1">
+                    Evaluated Draft Text ({draftContent.length} chars)
+                  </span>
+                  <p className="text-xs font-mono text-slate-800 line-clamp-2">
+                    "{draftContent}"
+                  </p>
+                </div>
+
+                <div className="overflow-x-auto border border-slate-100 rounded-xl">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="bg-slate-50 border-b border-slate-100 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
+                        <th className="py-2.5 px-3.5">Channel</th>
+                        <th className="py-2.5 px-3.5">Tone Profile Limits</th>
+                        <th className="py-2.5 px-3.5">Status</th>
+                        <th className="py-2.5 px-3.5">Tone Findings</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {compareResults.map((item) => {
+                        const hasViolations = item.findings && item.findings.length > 0;
+                        return (
+                          <tr key={item.channel} className="hover:bg-slate-50/50 transition-colors">
+                            <td className="py-3 px-3.5 font-bold text-slate-900 whitespace-nowrap">
+                              {item.channel}
+                            </td>
+                            <td className="py-3 px-3.5 text-slate-600">
+                              <div className="space-y-0.5 text-[11px]">
+                                <div>Max '!': <strong>{item.profile.maxExclamationMarks}</strong></div>
+                                <div>Max ALL-CAPS: <strong>{item.profile.maxAllCapsWords}</strong></div>
+                                <div>
+                                  Max Length: <strong>{item.profile.maxCharacters === 0 ? "No limit" : `${item.profile.maxCharacters} chars`}</strong>
+                                </div>
+                              </div>
+                            </td>
+                            <td className="py-3 px-3.5 whitespace-nowrap">
+                              {hasViolations ? (
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-50 text-red-700 inline-flex items-center gap-1 border border-red-200">
+                                  <AlertTriangle className="w-3 h-3" />
+                                  {item.findings.length} Finding{item.findings.length > 1 ? "s" : ""}
+                                </span>
+                              ) : (
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 inline-flex items-center gap-1 border border-emerald-200">
+                                  <CheckCircle2 className="w-3 h-3" />
+                                  Compliant
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-3 px-3.5">
+                              {hasViolations ? (
+                                <div className="space-y-2">
+                                  {item.findings.map((f, idx) => (
+                                    <div key={idx} className="p-2 bg-red-50/60 border border-red-100 rounded-lg text-xs space-y-1">
+                                      <div className="flex items-center gap-1.5">
+                                        <span className="font-mono font-bold text-red-700 text-[10px] px-1.5 py-0.5 bg-red-100 rounded">
+                                          {f.rule_id}
+                                        </span>
+                                        <span className="font-semibold text-slate-800 text-[11px]">
+                                          "{f.quote}"
+                                        </span>
+                                      </div>
+                                      <p className="text-[11px] text-slate-600">
+                                        {f.explanation}
+                                      </p>
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : (
+                                <span className="text-slate-400 italic text-[11px]">
+                                  No tone or length violations for this channel.
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : null}
+
+            <div className="pt-3 border-t border-slate-100 flex items-center justify-end">
+              <button
+                type="button"
+                onClick={() => setShowCompareModal(false)}
+                className="px-4 py-2 rounded-xl text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-300"
+              >
+                Close
               </button>
             </div>
           </div>

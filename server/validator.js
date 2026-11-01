@@ -11,6 +11,8 @@
  * 8. Records stats reporting kept, dropped, and merged separately.
  */
 
+import { INITIAL_TONE_PROFILES } from "./demoData.js";
+
 const REASONING_OR_COMPLIANCE_PATTERNS = [
   /\bwait\b/i,
   /\blet me check\b/i,
@@ -382,62 +384,134 @@ export function convertToSentenceCase(text, brandNames = ["CampusPro"]) {
 }
 
 /**
- * Deterministic tone checks that run on every text draft, independent of Gemini:
- * - T-05: Flags any word of 2+ letters that is fully uppercase, except the brand name (CampusPro) as written in the rules.
- *         Suggests the same words in normal sentence case (e.g. "Buy now before it sells out!").
- * - T-03: Flags when a draft has more than one exclamation mark.
- *         Suggests removing excess exclamation marks so at most one remains.
+ * Helper to identify all-caps words in text:
+ * - Minimum 2 letters
+ * - Fully uppercase (/^[A-Z]+$/)
+ * - Ignores single letters like "A" or "I"
+ * - Ignores brand terms and acronyms that appear in brandTerms
  */
-export function runDeterministicToneChecks(draftText, rules = [], brandNames = ["CampusPro"]) {
+export function getAllCapsWords(text, brandTerms = ["CampusPro"]) {
+  if (!text || typeof text !== "string") return [];
+  const words = text.match(/\b[A-Za-z0-9'-]+\b/g) || [];
+  const brandSet = new Set((brandTerms || ["CampusPro"]).map(b => (b || "").trim().toUpperCase()));
+
+  return words.filter(w => {
+    if (w.length < 2) return false;
+    if (!/^[A-Z]+$/.test(w)) return false;
+    if (brandSet.has(w.toUpperCase())) return false;
+    return true;
+  });
+}
+
+/**
+ * Normalizes and resolves channel tone profile
+ */
+export function resolveChannelProfile(channel, toneProfiles = INITIAL_TONE_PROFILES) {
+  const profiles = toneProfiles && typeof toneProfiles === "object" ? toneProfiles : INITIAL_TONE_PROFILES;
+  const clean = (channel || "Social Media / Twitter").trim();
+
+  if (profiles[clean]) {
+    return { channelName: clean, profile: profiles[clean] };
+  }
+
+  const lower = clean.toLowerCase();
+  for (const ch of Object.keys(profiles)) {
+    if (ch.toLowerCase() === lower) {
+      return { channelName: ch, profile: profiles[ch] };
+    }
+  }
+
+  if (lower.includes("twitter") || lower.includes("tweet") || lower.includes("social")) {
+    const key = Object.keys(profiles).find(k => k.toLowerCase().includes("twitter")) || "Social Media / Twitter";
+    return { channelName: key, profile: profiles[key] };
+  }
+  if (lower.includes("email") || lower.includes("newsletter")) {
+    const key = Object.keys(profiles).find(k => k.toLowerCase().includes("email")) || "Marketing Email";
+    return { channelName: key, profile: profiles[key] };
+  }
+  if (lower.includes("landing") || lower.includes("page") || lower.includes("web")) {
+    const key = Object.keys(profiles).find(k => k.toLowerCase().includes("landing")) || "Product Landing Page";
+    return { channelName: key, profile: profiles[key] };
+  }
+  if (lower.includes("banner") || lower.includes("ad") || lower.includes("display")) {
+    const key = Object.keys(profiles).find(k => k.toLowerCase().includes("banner")) || "Ad Copy / Banner";
+    return { channelName: key, profile: profiles[key] };
+  }
+
+  return {
+    channelName: "Social Media / Twitter",
+    profile: profiles["Social Media / Twitter"] || INITIAL_TONE_PROFILES["Social Media / Twitter"]
+  };
+}
+
+/**
+ * Deterministic tone checks that run on every text draft, independent of Gemini:
+ * - T-05: Flags any word of 2+ letters that is fully uppercase above the channel limit,
+ *         exempting brandTerms.
+ * - T-03: Flags exclamation marks above the channel's maxExclamationMarks.
+ * - T-06: Flags text longer than the channel's maxCharacters limit.
+ */
+export function runDeterministicToneChecks(
+  draftText,
+  rules = [],
+  brandTerms = ["CampusPro"],
+  channel = "Social Media / Twitter",
+  toneProfile = null
+) {
   const findings = [];
-  if (!draftText || typeof draftText !== "string") return findings;
+  if (!draftText || typeof draftText !== "string" || !draftText.trim()) return findings;
 
   const ruleIds = new Set(rules.map(r => (r.id || "").toUpperCase()));
   const hasT05 = rules.length === 0 || ruleIds.has("T-05");
   const hasT03 = rules.length === 0 || ruleIds.has("T-03");
+  const hasT06 = rules.length === 0 || ruleIds.has("T-06");
 
-  // --- T-05: No all-caps words except the brand name (CampusPro) ---
+  const { channelName, profile } = toneProfile
+    ? { channelName: channel || "Social Media / Twitter", profile: toneProfile }
+    : resolveChannelProfile(channel, INITIAL_TONE_PROFILES);
+
+  // --- T-05: Channel max all-caps words limit ---
   if (hasT05) {
-    const sentenceRegex = /[^.!?\n]+(?:[.!?\n]+|$)/g;
-    let m;
-    while ((m = sentenceRegex.exec(draftText)) !== null) {
-      const rawSentence = m[0];
-      const trimmed = rawSentence.trim();
-      if (!trimmed) continue;
+    const maxCaps = typeof profile.maxAllCapsWords === "number" ? profile.maxAllCapsWords : 0;
+    const allCapsWords = getAllCapsWords(draftText, brandTerms);
+    if (allCapsWords.length > maxCaps) {
+      const explanation = `${channelName} allows at most ${maxCaps} all-caps word${maxCaps === 1 ? "" : "s"}; found ${allCapsWords.length}.`;
+      const sentenceRegex = /[^.!?\n]+(?:[.!?\n]+|$)/g;
+      let m;
+      while ((m = sentenceRegex.exec(draftText)) !== null) {
+        const rawSentence = m[0];
+        const trimmed = rawSentence.trim();
+        if (!trimmed) continue;
 
-      const words = trimmed.match(/\b[A-Za-z0-9'-]+\b/g) || [];
-      const allCapsWords = words.filter(w => {
-        if (w.length < 2) return false;
-        if (!/^[A-Z]+$/.test(w)) return false;
-        // If it's already the exact brand name as written in rules, exempt it
-        if (brandNames.includes(w)) return false;
-        return true;
-      });
-
-      if (allCapsWords.length > 0) {
-        const fix = convertToSentenceCase(trimmed, brandNames);
-        if (fix !== trimmed) {
-          findings.push({
-            quote: trimmed,
-            rule_id: "T-05",
-            category: "tone",
-            severity: "low",
-            explanation: `No all-caps words except the brand name (${brandNames.join(", ")}). Use normal sentence case.`,
-            suggested_fix: fix,
-            action: "replace",
-            needs_human_judgement: false
-          });
+        const sentenceCaps = getAllCapsWords(trimmed, brandTerms);
+        if (sentenceCaps.length > 0) {
+          const fix = convertToSentenceCase(trimmed, brandTerms);
+          if (fix !== trimmed) {
+            findings.push({
+              quote: trimmed,
+              rule_id: "T-05",
+              category: "tone",
+              severity: "low",
+              explanation,
+              suggested_fix: fix,
+              action: "replace",
+              needs_human_judgement: false
+            });
+          }
         }
       }
     }
   }
 
-  // --- T-03: Friendly tone. At most one exclamation mark per post ---
+  // --- T-03: Friendly tone. Channel max exclamation marks ---
   if (hasT03) {
+    const maxEx = typeof profile.maxExclamationMarks === "number" ? profile.maxExclamationMarks : 1;
     const totalExMarks = (draftText.match(/!/g) || []).length;
-    if (totalExMarks >= 2) {
+    if (totalExMarks > maxEx) {
+      const explanation = `${channelName} allows at most ${maxEx} exclamation mark${maxEx === 1 ? "" : "s"}; found ${totalExMarks}.`;
       const runMatches = draftText.match(/!{2,}/g);
       if (runMatches && runMatches.length > 0) {
+        // Highlight the exact extra occurrence (e.g. for "Buy now!!" highlight the "!!")
         const uniqueRuns = Array.from(new Set(runMatches));
         for (const run of uniqueRuns) {
           findings.push({
@@ -445,13 +519,14 @@ export function runDeterministicToneChecks(draftText, rules = [], brandNames = [
             rule_id: "T-03",
             category: "tone",
             severity: "low",
-            explanation: "Friendly tone. At most one exclamation mark per post. Reduce run of exclamation marks to a single '!'.",
-            suggested_fix: "!",
+            explanation,
+            suggested_fix: maxEx === 0 ? "." : "!",
             action: "replace",
             needs_human_judgement: false
           });
         }
       } else {
+        // Scattered exclamation marks across sentences
         const sentenceRegex = /[^.!?\n]+(?:[.!?\n]+|$)/g;
         const sentences = [];
         let sm;
@@ -468,42 +543,103 @@ export function runDeterministicToneChecks(draftText, rules = [], brandNames = [
         let seenExMarks = 0;
         for (const s of sentences) {
           if (!s.hasExMark) continue;
-
-          if (seenExMarks === 0) {
-            seenExMarks += 1;
-            continue;
-          } else {
-            // Additional sentences with ! exceed the limit of 1
+          seenExMarks += s.exCount;
+          if (seenExMarks > maxEx) {
             const fix = s.trimmed.replace(/!+/g, ".");
             findings.push({
               quote: s.trimmed,
               rule_id: "T-03",
               category: "tone",
               severity: "low",
-              explanation: "Friendly tone. At most one exclamation mark per post.",
+              explanation,
               suggested_fix: fix,
               action: "replace",
               needs_human_judgement: false
             });
-            seenExMarks += s.exCount;
           }
         }
       }
     }
   }
 
+  // --- T-06: Channel max character limit ---
+  if (hasT06 && typeof profile.maxCharacters === "number" && profile.maxCharacters > 0) {
+    const maxChars = profile.maxCharacters;
+    const charCount = draftText.length;
+    if (charCount > maxChars) {
+      const explanation = `${channelName} allows at most ${maxChars} characters; found ${charCount}.`;
+      const excess = draftText.slice(maxChars);
+      const quote = excess.trim() || excess;
+      findings.push({
+        quote,
+        rule_id: "T-06",
+        category: "tone",
+        severity: "medium",
+        explanation,
+        suggested_fix: "",
+        action: "remove",
+        needs_human_judgement: true
+      });
+    }
+  }
+
   return findings;
 }
 
-export function validateFindings(draftText, rawFindings, rules = [], facts = []) {
+/**
+ * Compare code-based tone checks across all 4 channels instantly without AI calls
+ */
+export function compareChannelTones(
+  draftText,
+  rules = [],
+  brandTerms = ["CampusPro"],
+  toneProfiles = INITIAL_TONE_PROFILES
+) {
+  const channels = [
+    "Social Media / Twitter",
+    "Marketing Email",
+    "Product Landing Page",
+    "Ad Copy / Banner"
+  ];
+
+  return channels.map(channel => {
+    const prof = (toneProfiles && toneProfiles[channel]) || INITIAL_TONE_PROFILES[channel];
+    const findings = runDeterministicToneChecks(draftText, rules, brandTerms, channel, prof);
+    return {
+      channel,
+      profile: prof,
+      findings
+    };
+  });
+}
+
+export function validateFindings(
+  draftText,
+  rawFindings,
+  rules = [],
+  facts = [],
+  brandTerms = ["CampusPro"],
+  channel = "Social Media / Twitter",
+  toneProfile = null
+) {
   const validRuleIds = new Set([
     ...rules.map(r => r.id.trim().toUpperCase()),
     ...facts.map(f => f.id.trim().toUpperCase()),
-    "SEC-01", "V-01", "V-02", "V-03", "V-04"
+    "SEC-01", "V-01", "V-02", "V-03", "V-04", "T-06"
   ]);
 
+  const { channelName, profile } = toneProfile
+    ? { channelName: channel || "Social Media / Twitter", profile: toneProfile }
+    : resolveChannelProfile(channel, INITIAL_TONE_PROFILES);
+
   // Run deterministic checks that run on every text draft, independent of Gemini
-  const deterministicToneFindings = runDeterministicToneChecks(draftText, rules);
+  const deterministicToneFindings = runDeterministicToneChecks(
+    draftText,
+    rules,
+    brandTerms,
+    channel,
+    profile
+  );
 
   const rawList = Array.isArray(rawFindings)
     ? rawFindings
@@ -547,35 +683,34 @@ export function validateFindings(draftText, rawFindings, rules = [], facts = [])
       rejectionReasons.push(`Rule ID "${ruleId}" does not exist in brand rules or approved facts`);
     }
 
-    // T-05 check: only fire when a word is fully uppercase
+    // T-05 check: only fire when all-caps words exceed channel limit
     if (ruleId === "T-05") {
-      const words = quote.match(/\b[A-Za-z0-9'-]+\b/g) || [];
-      const hasAllCapsWord = words.some(w => {
-        if (w.length < 2) return false;
-        if (!/^[A-Z]+$/.test(w)) return false;
-        if (w === "CampusPro") return false;
-        return true;
-      });
-      if (!hasAllCapsWord) {
-        rejectionReasons.push("No fully uppercase words found in flagged text (T-05 only applies to fully uppercase words)");
+      const allCapsWords = getAllCapsWords(draftText, brandTerms);
+      const maxCaps = typeof profile.maxAllCapsWords === "number" ? profile.maxAllCapsWords : 0;
+      if (allCapsWords.length <= maxCaps) {
+        rejectionReasons.push(`Draft text has ${allCapsWords.length} all-caps words, which does not exceed the limit of ${maxCaps} for ${channelName}.`);
+      } else {
+        const quoteCaps = getAllCapsWords(quote, brandTerms);
+        if (quoteCaps.length === 0) {
+          rejectionReasons.push("No all-caps words found in flagged text (T-05 only applies to all-caps words)");
+        }
       }
     }
 
-    // T-03 check: Rule T-03 (more than one exclamation mark) must be decided by code, not the model.
-    // Count "!" characters in the draft text.
-    // Flag T-03 only if there are 2 or more consecutive or total "!" in the draft.
-    // If the model returns T-03 when the count is less than 2, drop it.
+    // T-03 check: Rule T-03 (exclamation marks) decided by code, not model.
+    // Flag T-03 only if exclamation marks exceed channel maxExclamationMarks.
+    const maxEx = typeof profile.maxExclamationMarks === "number" ? profile.maxExclamationMarks : 1;
     const totalExMarks = (draftText.match(/!/g) || []).length;
     const hasRunOfExMarks = Boolean(draftText.match(/!{2,}/));
 
     if (ruleId === "T-03") {
-      if (totalExMarks < 2) {
-        rejectionReasons.push(`Draft text has fewer than 2 exclamation marks (${totalExMarks} found). Rule T-03 only applies when there are 2 or more exclamation marks.`);
+      if (totalExMarks <= maxEx) {
+        rejectionReasons.push(`Draft text has ${totalExMarks} exclamation mark${totalExMarks === 1 ? "" : "s"}, which does not exceed the limit of ${maxEx} for ${channelName}.`);
       } else if (hasRunOfExMarks) {
         // Highlight exactly the run of exclamation marks
         const runMatch = quote.match(/!{2,}/) || draftText.match(/!{2,}/);
         quote = runMatch ? runMatch[0] : quote;
-        suggestedFix = "!";
+        suggestedFix = maxEx === 0 ? "." : "!";
         finding.action = "replace";
         finding.needs_human_judgement = false;
       } else {
@@ -587,6 +722,13 @@ export function validateFindings(draftText, rawFindings, rules = [], facts = [])
           finding.action = "replace";
           finding.needs_human_judgement = false;
         }
+      }
+    }
+
+    // T-06 check: text length limit
+    if (ruleId === "T-06") {
+      if (typeof profile.maxCharacters !== "number" || profile.maxCharacters === 0 || draftText.length <= profile.maxCharacters) {
+        rejectionReasons.push(`Draft text length (${draftText.length} characters) does not exceed the limit of ${profile.maxCharacters || "no limit"} for ${channelName}.`);
       }
     } else if (hasRunOfExMarks && (ruleId.startsWith("R-") || ruleId.startsWith("F-") || ruleId.includes("+"))) {
       if (/!{2,}$/.test(quote)) {

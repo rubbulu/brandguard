@@ -34,6 +34,12 @@ export const INITIAL_RULES = [
     severity: "low"
   },
   {
+    id: "T-06",
+    category: "tone",
+    text: "Draft length must not exceed the channel character limit.",
+    severity: "medium"
+  },
+  {
     id: "R-20",
     category: "accessibility",
     text: "Every image needs alt text.",
@@ -78,6 +84,31 @@ export const INITIAL_VISUAL_SETTINGS = {
     }
   ]
 };
+
+export const INITIAL_TONE_PROFILES = {
+  "Social Media / Twitter": {
+    maxExclamationMarks: 1,
+    maxAllCapsWords: 0,
+    maxCharacters: 280
+  },
+  "Marketing Email": {
+    maxExclamationMarks: 2,
+    maxAllCapsWords: 2,
+    maxCharacters: 0
+  },
+  "Product Landing Page": {
+    maxExclamationMarks: 2,
+    maxAllCapsWords: 2,
+    maxCharacters: 0
+  },
+  "Ad Copy / Banner": {
+    maxExclamationMarks: 1,
+    maxAllCapsWords: 0,
+    maxCharacters: 120
+  }
+};
+
+export const INITIAL_BRAND_TERMS = ["CampusPro"];
 
 export const INITIAL_FACTS = [
   {
