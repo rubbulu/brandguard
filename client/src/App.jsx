@@ -143,6 +143,10 @@ export default function App() {
   const [showWhyDropped, setShowWhyDropped] = useState(false);
   const [editingProposalId, setEditingProposalId] = useState(null);
   const [editedProposalData, setEditedProposalData] = useState({});
+  const [proposalEditError, setProposalEditError] = useState(null);
+  const [savingProposalId, setSavingProposalId] = useState(null);
+  const [hideDecidedItems, setHideDecidedItems] = useState(false);
+  const [guidelineSourceName, setGuidelineSourceName] = useState("Pasted text");
   const [isProposalActionPending, setIsProposalActionPending] = useState(false);
   const guidelineFileInputRef = useRef(null);
 
@@ -740,6 +744,10 @@ export default function App() {
         setLastImportStats(null);
         setIsTruncated(false);
         setEditingProposalId(null);
+        setProposalEditError(null);
+        setSavingProposalId(null);
+        setHideDecidedItems(false);
+        setGuidelineSourceName("Pasted text");
         await loadWorkspaceData();
         showNotice("Workspace reset to clean initial state.");
       }
@@ -1111,6 +1119,17 @@ export default function App() {
     }
   };
 
+  // Helper: Format extraction time
+  const formatExtractionTime = (isoString) => {
+    if (!isoString) return "Just now";
+    try {
+      const d = new Date(isoString);
+      return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    } catch {
+      return "Recent";
+    }
+  };
+
   // Manager: Guideline Import & Proposals Handlers
   const handleTrySampleGuideline = async () => {
     setGuidelineError(null);
@@ -1120,6 +1139,7 @@ export default function App() {
         const data = await res.json();
         setGuidelineText(data.text);
         setGuidelineInputTab("paste");
+        setGuidelineSourceName("Sample guideline");
         showNotice("Loaded sample brand guideline for CampusPro (~12 sentences).");
       } else {
         const err = await res.json();
@@ -1142,23 +1162,57 @@ export default function App() {
       return;
     }
 
-    // Check extension
     const ext = file.name.split(".").pop().toLowerCase();
-    if (!["txt", "md", "docx", "pdf"].includes(ext)) {
-      setGuidelineError(`Unsupported file extension ".${ext}". Please upload a .txt, .md, .docx, or .pdf document.`);
+    const validExtension = ["txt", "md", "docx", "pdf"].includes(ext);
+    if (!validExtension) {
+      setGuidelineError("Unsupported file. Please upload .txt, .md, .docx or a text-based .pdf.");
       if (guidelineFileInputRef.current) guidelineFileInputRef.current.value = "";
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = (loadEvent) => {
-      setGuidelineFileBase64(loadEvent.target.result);
-      setGuidelineFileName(file.name);
+    // Inspect real content (magic bytes) to catch renamed images/binaries
+    const checkReader = new FileReader();
+    checkReader.onload = (loadEvent) => {
+      const buffer = new Uint8Array(loadEvent.target.result);
+
+      // Known image / binary headers
+      const isPng = buffer.length >= 4 && buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47;
+      const isJpg = buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+      const isGif = buffer.length >= 3 && buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46;
+      const isExe = buffer.length >= 2 && buffer[0] === 0x4d && buffer[1] === 0x5a;
+      const isRiff = buffer.length >= 4 && buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46;
+
+      const isPdf = buffer.length >= 5 && buffer[0] === 0x25 && buffer[1] === 0x50 && buffer[2] === 0x44 && buffer[3] === 0x46 && buffer[4] === 0x2d;
+      const isDocx = buffer.length >= 4 && buffer[0] === 0x50 && buffer[1] === 0x4b && buffer[2] === 0x03 && buffer[3] === 0x04;
+
+      let hasBinaryBytes = false;
+      const checkLen = Math.min(buffer.length, 512);
+      for (let i = 0; i < checkLen; i++) {
+        const b = buffer[i];
+        if (b === 0x00 || (b < 0x09) || b === 0x0b || b === 0x0c || (b >= 0x0e && b <= 0x1f)) {
+          hasBinaryBytes = true;
+          break;
+        }
+      }
+
+      if (isPng || isJpg || isGif || isExe || isRiff || (!isPdf && !isDocx && hasBinaryBytes)) {
+        setGuidelineError("Unsupported file. Please upload .txt, .md, .docx or a text-based .pdf.");
+        setGuidelineFileBase64(null);
+        setGuidelineFileName("");
+        if (guidelineFileInputRef.current) guidelineFileInputRef.current.value = "";
+        return;
+      }
+
+      // Valid - read file as DataURL for API transfer
+      const dataUrlReader = new FileReader();
+      dataUrlReader.onload = (dataUrlEvent) => {
+        setGuidelineFileBase64(dataUrlEvent.target.result);
+        setGuidelineFileName(file.name);
+        setGuidelineSourceName(file.name);
+      };
+      dataUrlReader.readAsDataURL(file);
     };
-    reader.onerror = () => {
-      setGuidelineError("Failed to read file.");
-    };
-    reader.readAsDataURL(file);
+    checkReader.readAsArrayBuffer(file.slice(0, 1024));
   };
 
   const handleExtractProposals = async () => {
@@ -1174,11 +1228,16 @@ export default function App() {
 
     setIsExtractingGuideline(true);
     try {
+      const effectiveSource =
+        guidelineInputTab === "upload"
+          ? (guidelineFileName || "Uploaded document")
+          : (guidelineSourceName === "Sample guideline" ? "Sample guideline" : "Pasted text");
+
       const payload = {
         text: guidelineInputTab === "paste" ? guidelineText : undefined,
         fileBase64: guidelineInputTab === "upload" ? guidelineFileBase64 : undefined,
-        fileName: guidelineInputTab === "upload" ? guidelineFileName : "Pasted guideline text",
-        sourceName: guidelineInputTab === "upload" ? guidelineFileName : "Pasted guideline text"
+        fileName: guidelineInputTab === "upload" ? guidelineFileName : undefined,
+        sourceName: effectiveSource
       };
 
       const res = await wsFetch("/api/guidelines/extract", {
@@ -1208,8 +1267,24 @@ export default function App() {
   };
 
   const handleProposalDecision = async (proposalId, action, editedData = null) => {
-    if (isProposalActionPending) return;
-    setIsProposalActionPending(true);
+    if (savingProposalId) return;
+
+    if (action === "edit_and_approve") {
+      const textVal = editedData?.text !== undefined ? editedData.text : "";
+      const trimmed = textVal.trim();
+      if (!trimmed || trimmed.length < 5) {
+        setProposalEditError("Rule text can't be empty");
+        return;
+      }
+      if (textVal.length > 500) {
+        setProposalEditError("Rule text cannot exceed 500 characters.");
+        return;
+      }
+    }
+
+    setSavingProposalId(proposalId);
+    setProposalEditError(null);
+
     try {
       const res = await wsFetch(`/api/guidelines/proposals/${proposalId}/decide`, {
         method: "POST",
@@ -1232,18 +1307,22 @@ export default function App() {
           showNotice("Proposal rejected.");
         }
       } else {
-        alert(data.error || "Failed to record proposal decision.");
+        if (action === "edit_and_approve") {
+          setProposalEditError(data.error || "Rule text can't be empty");
+        } else {
+          alert(data.error || "Failed to record proposal decision.");
+        }
       }
     } catch (e) {
       alert(`Network error: ${e.message}`);
     } finally {
-      setIsProposalActionPending(false);
+      setSavingProposalId(null);
     }
   };
 
   const handleUndoProposal = async (proposalId) => {
-    if (isProposalActionPending) return;
-    setIsProposalActionPending(true);
+    if (savingProposalId) return;
+    setSavingProposalId(proposalId);
     try {
       const res = await wsFetch(`/api/guidelines/proposals/${proposalId}/undo`, {
         method: "POST"
@@ -1263,7 +1342,7 @@ export default function App() {
     } catch (e) {
       alert(`Network error: ${e.message}`);
     } finally {
-      setIsProposalActionPending(false);
+      setSavingProposalId(null);
     }
   };
 
@@ -2225,230 +2304,385 @@ export default function App() {
 
                 {/* Review Queue Cards */}
                 {proposals.length > 0 && (
-                  <div className="pt-2 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <h3 className="text-xs font-extrabold text-slate-800 uppercase tracking-wider">
-                        Human Review Queue ({proposals.filter(p => p.status === "pending").length} Pending Review)
-                      </h3>
-                      <span className="text-[11px] text-slate-500">
-                        Rules and facts enter the library ONLY when explicitly approved by a person.
-                      </span>
+                  <div className="pt-2 space-y-4">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-2 border-b border-slate-100">
+                      <div>
+                        <h3 className="text-xs font-extrabold text-slate-800 uppercase tracking-wider">
+                          Human Review Queue ({proposals.filter(p => p.status === "pending").length} Pending Review)
+                        </h3>
+                        <p className="text-[11px] text-slate-500">
+                          Rules and facts enter the library ONLY when explicitly approved by a person.
+                        </p>
+                      </div>
+
+                      <div className="flex items-center gap-3">
+                        <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-600 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={hideDecidedItems}
+                            onChange={(e) => setHideDecidedItems(e.target.checked)}
+                            className="w-3.5 h-3.5 rounded text-blue-600 focus:ring-blue-500 cursor-pointer"
+                          />
+                          <span>Hide decided items</span>
+                        </label>
+                        <button
+                          type="button"
+                          onClick={handleClearProposals}
+                          className="px-2.5 py-1 text-xs text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg border border-slate-200 font-medium transition-all"
+                        >
+                          Clear Queue
+                        </button>
+                      </div>
                     </div>
 
-                    <div className="space-y-3">
-                      {proposals.map((proposal) => {
-                        const isEditing = editingProposalId === proposal.id;
+                    {(() => {
+                      const visibleProposals = hideDecidedItems
+                        ? proposals.filter((p) => p.status === "pending")
+                        : proposals;
+
+                      if (visibleProposals.length === 0) {
                         return (
-                          <div
-                            key={proposal.id}
-                            className={`p-4 rounded-xl border transition-all ${
-                              proposal.status === "approved"
-                                ? "bg-green-50/40 border-green-200"
-                                : proposal.status === "rejected"
-                                ? "bg-slate-50 border-slate-200 opacity-70"
-                                : "bg-white border-slate-200 shadow-2xs hover:border-blue-300"
-                            }`}
-                          >
-                            <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
-                              <div className="space-y-2 flex-1">
-                                {/* Badge Row */}
-                                <div className="flex flex-wrap items-center gap-2">
-                                  <span
-                                    className={`px-2 py-0.5 rounded text-[10px] font-extrabold uppercase tracking-wide ${
-                                      proposal.type === "fact"
-                                        ? "bg-purple-100 text-purple-700"
-                                        : "bg-blue-100 text-blue-700"
-                                    }`}
-                                  >
-                                    {proposal.type}
-                                  </span>
-                                  {proposal.category && (
-                                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-700 capitalize">
-                                      {proposal.category}
-                                    </span>
-                                  )}
-                                  {proposal.type === "rule" && proposal.severity && (
-                                    <span
-                                      className={`px-2 py-0.5 rounded text-[10px] font-bold capitalize ${
-                                        proposal.severity === "high"
-                                          ? "bg-red-100 text-red-700"
-                                          : proposal.severity === "medium"
-                                          ? "bg-amber-100 text-amber-700"
-                                          : "bg-slate-100 text-slate-700"
-                                      }`}
-                                    >
-                                      {proposal.severity} severity
-                                    </span>
-                                  )}
-                                  {proposal.duplicateOf && (
-                                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-200 flex items-center gap-1">
-                                      <AlertTriangle className="w-3 h-3 text-amber-600" />
-                                      {proposal.duplicateOf}
-                                    </span>
-                                  )}
-                                  {proposal.status === "approved" && (
-                                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-green-100 text-green-800 flex items-center gap-1">
-                                      <CheckCircle2 className="w-3 h-3 text-green-600" />
-                                      Approved as {proposal.approvedId}
-                                    </span>
-                                  )}
-                                  {proposal.status === "rejected" && (
-                                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-200 text-slate-700">
-                                      Rejected
-                                    </span>
-                                  )}
-                                </div>
-
-                                {/* Proposal Title and Statement */}
-                                {isEditing ? (
-                                  <div className="space-y-2 pt-1 bg-blue-50/50 p-3 rounded-lg border border-blue-200">
-                                    <label className="block text-[11px] font-bold text-slate-700">Edit Proposal Details</label>
-                                    <input
-                                      type="text"
-                                      value={editedProposalData.title ?? proposal.title}
-                                      onChange={(e) => setEditedProposalData({ ...editedProposalData, title: e.target.value })}
-                                      className="w-full px-2.5 py-1 text-xs rounded border border-slate-300 font-bold"
-                                      placeholder="Proposal Title"
-                                    />
-                                    <textarea
-                                      rows={2}
-                                      value={editedProposalData.text ?? proposal.text}
-                                      onChange={(e) => setEditedProposalData({ ...editedProposalData, text: e.target.value })}
-                                      className="w-full px-2.5 py-1 text-xs rounded border border-slate-300 font-medium"
-                                      placeholder="Policy instruction or fact statement"
-                                    />
-                                    {proposal.type === "rule" && (
-                                      <div className="flex items-center gap-3">
-                                        <label className="text-[11px] font-bold text-slate-600">Severity:</label>
-                                        <select
-                                          value={editedProposalData.severity ?? proposal.severity}
-                                          onChange={(e) => setEditedProposalData({ ...editedProposalData, severity: e.target.value })}
-                                          className="px-2 py-1 text-xs rounded border border-slate-300"
-                                        >
-                                          <option value="high">High</option>
-                                          <option value="medium">Medium</option>
-                                          <option value="low">Low</option>
-                                        </select>
-                                      </div>
-                                    )}
-                                    <div className="flex items-center gap-2 pt-1">
-                                      <button
-                                        type="button"
-                                        disabled={isProposalActionPending}
-                                        onClick={() => handleProposalDecision(proposal.id, "edit_and_approve", editedProposalData)}
-                                        className="px-3 py-1 bg-green-600 hover:bg-green-700 text-white rounded text-xs font-bold shadow-2xs"
-                                      >
-                                        Save & Approve
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => { setEditingProposalId(null); setEditedProposalData({}); }}
-                                        className="px-2.5 py-1 text-slate-600 hover:text-slate-800 text-xs font-medium"
-                                      >
-                                        Cancel
-                                      </button>
-                                    </div>
-                                  </div>
-                                ) : (
-                                  <>
-                                    <h4 className="text-sm font-bold text-slate-900">{proposal.title}</h4>
-                                    <p className="text-xs text-slate-800 font-medium bg-slate-50 p-2.5 rounded-lg border border-slate-200">
-                                      {proposal.text}
-                                    </p>
-                                  </>
-                                )}
-
-                                {/* Verbatim Source Sentence in Context */}
-                                {proposal.excerpt && (
-                                  <div className="text-[11px] text-slate-600 bg-slate-50/70 p-2.5 rounded-lg border border-slate-200/70">
-                                    <span className="font-bold text-slate-700 block mb-1">Source sentence in context:</span>
-                                    <div className="font-mono text-slate-700 text-[11px]">
-                                      <span>{proposal.excerpt.before}</span>
-                                      <mark className="bg-amber-200/90 text-slate-900 px-1 py-0.5 rounded font-bold mx-0.5">
-                                        {proposal.excerpt.match}
-                                      </mark>
-                                      <span>{proposal.excerpt.after}</span>
-                                    </div>
-                                  </div>
-                                )}
-                              </div>
-
-                              {/* Actions Column */}
-                              <div className="flex sm:flex-col items-center gap-2 shrink-0">
-                                {proposal.status === "pending" && !isEditing && (
-                                  <>
-                                    <button
-                                      type="button"
-                                      disabled={isProposalActionPending}
-                                      onClick={() => handleProposalDecision(proposal.id, "approve")}
-                                      className="w-full px-3 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-bold rounded-lg transition-all shadow-2xs flex items-center justify-center gap-1.5"
-                                    >
-                                      <Check className="w-3.5 h-3.5" />
-                                      Approve
-                                    </button>
-                                    <button
-                                      type="button"
-                                      disabled={isProposalActionPending}
-                                      onClick={() => {
-                                        setEditingProposalId(proposal.id);
-                                        setEditedProposalData({
-                                          title: proposal.title,
-                                          text: proposal.text,
-                                          category: proposal.category,
-                                          severity: proposal.severity
-                                        });
-                                      }}
-                                      className="w-full px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-1.5"
-                                    >
-                                      <Edit3 className="w-3.5 h-3.5" />
-                                      Edit & Approve
-                                    </button>
-                                    <button
-                                      type="button"
-                                      disabled={isProposalActionPending}
-                                      onClick={() => handleProposalDecision(proposal.id, "reject")}
-                                      className="w-full px-3 py-1.5 bg-slate-50 hover:bg-red-50 text-slate-600 hover:text-red-700 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-1.5"
-                                    >
-                                      <X className="w-3.5 h-3.5" />
-                                      Reject
-                                    </button>
-                                  </>
-                                )}
-
-                                {proposal.status === "approved" && (
-                                  <div className="space-y-1 text-right">
-                                    <button
-                                      type="button"
-                                      disabled={isProposalActionPending}
-                                      onClick={() => handleUndoProposal(proposal.id)}
-                                      className="px-2.5 py-1 text-xs text-amber-700 hover:text-amber-900 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg font-bold flex items-center gap-1"
-                                      title="Rollback this approval and remove the item from the library"
-                                    >
-                                      <RotateCcw className="w-3 h-3" />
-                                      Undo Approval
-                                    </button>
-                                    <p className="text-[10px] text-slate-400 italic text-right max-w-[140px]">
-                                      Also removable via table delete button below
-                                    </p>
-                                  </div>
-                                )}
-
-                                {proposal.status === "rejected" && (
-                                  <button
-                                    type="button"
-                                    disabled={isProposalActionPending}
-                                    onClick={() => handleProposalDecision(proposal.id, "pending")}
-                                    className="px-2.5 py-1 text-xs text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg font-medium"
-                                  >
-                                    Reconsider
-                                  </button>
-                                )}
-                              </div>
-                            </div>
+                          <div className="p-6 bg-slate-50 rounded-xl text-center text-xs text-slate-500 border border-dashed border-slate-200">
+                            {hideDecidedItems
+                              ? "No pending proposals. All items have been decided."
+                              : "No proposals in queue."}
                           </div>
                         );
-                      })}
-                    </div>
+                      }
+
+                      // Group by sourceName
+                      const sourceGroups = [];
+                      const groupMap = new Map();
+
+                      for (const p of visibleProposals) {
+                        const src = p.sourceName || "Pasted text";
+                        if (!groupMap.has(src)) {
+                          const newGroup = {
+                            sourceName: src,
+                            latestTime: p.importedAt || p.createdAt || "",
+                            items: []
+                          };
+                          groupMap.set(src, newGroup);
+                          sourceGroups.push(newGroup);
+                        }
+                        const group = groupMap.get(src);
+                        group.items.push(p);
+                        const itemTime = p.importedAt || p.createdAt || "";
+                        if (itemTime && (!group.latestTime || new Date(itemTime) > new Date(group.latestTime))) {
+                          group.latestTime = itemTime;
+                        }
+                      }
+
+                      // Sort groups: newest first
+                      sourceGroups.sort((a, b) => {
+                        const timeA = a.latestTime ? new Date(a.latestTime).getTime() : 0;
+                        const timeB = b.latestTime ? new Date(b.latestTime).getTime() : 0;
+                        return timeB - timeA;
+                      });
+
+                      // Within each group, pending items on top
+                      for (const group of sourceGroups) {
+                        group.items.sort((a, b) => {
+                          if (a.status === "pending" && b.status !== "pending") return -1;
+                          if (a.status !== "pending" && b.status === "pending") return 1;
+                          return 0;
+                        });
+                      }
+
+                      return (
+                        <div className="space-y-6">
+                          {sourceGroups.map((group) => (
+                            <div key={group.sourceName} className="space-y-3">
+                              <div className="flex items-center justify-between pb-1.5 border-b border-slate-200">
+                                <div className="flex items-center gap-2">
+                                  <FileText className="w-3.5 h-3.5 text-blue-600" />
+                                  <h4 className="text-xs font-bold text-slate-800">
+                                    Source: {group.sourceName}
+                                  </h4>
+                                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">
+                                    {group.items.length} {group.items.length === 1 ? "item" : "items"}
+                                    {group.items.filter(i => i.status === "pending").length > 0 &&
+                                      ` (${group.items.filter(i => i.status === "pending").length} pending)`}
+                                  </span>
+                                </div>
+                                <span className="text-[11px] text-slate-400">
+                                  Latest: {formatExtractionTime(group.latestTime)}
+                                </span>
+                              </div>
+
+                              <div className="space-y-3">
+                                {group.items.map((proposal) => {
+                                  const isEditing = editingProposalId === proposal.id;
+                                  const isSavingThis = savingProposalId === proposal.id;
+
+                                  return (
+                                    <div
+                                      key={proposal.id}
+                                      className={`p-4 rounded-xl border transition-all ${
+                                        proposal.status === "approved"
+                                          ? "bg-green-50/40 border-green-200"
+                                          : proposal.status === "rejected"
+                                          ? "bg-slate-50 border-slate-200 opacity-70"
+                                          : "bg-white border-slate-200 shadow-2xs hover:border-blue-300"
+                                      }`}
+                                    >
+                                      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+                                        <div className="space-y-2 flex-1">
+                                          {/* Source & Extraction Time Label */}
+                                          <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-500 font-medium">
+                                            <span className="font-semibold text-slate-700">Source:</span>
+                                            <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 font-mono text-[10px]">
+                                              {proposal.sourceName || "Pasted text"}
+                                            </span>
+                                            <span>•</span>
+                                            <span>Extracted: {formatExtractionTime(proposal.importedAt || proposal.createdAt)}</span>
+                                          </div>
+
+                                          {/* Badge Row */}
+                                          <div className="flex flex-wrap items-center gap-2">
+                                            <span
+                                              className={`px-2 py-0.5 rounded text-[10px] font-extrabold uppercase tracking-wide ${
+                                                proposal.type === "fact"
+                                                  ? "bg-purple-100 text-purple-700"
+                                                  : "bg-blue-100 text-blue-700"
+                                              }`}
+                                            >
+                                              {proposal.type}
+                                            </span>
+                                            {proposal.category && (
+                                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-700 capitalize">
+                                                {proposal.category}
+                                              </span>
+                                            )}
+                                            {proposal.type === "rule" && proposal.severity && (
+                                              <span
+                                                className={`px-2 py-0.5 rounded text-[10px] font-bold capitalize ${
+                                                  proposal.severity === "high"
+                                                    ? "bg-red-100 text-red-700"
+                                                    : proposal.severity === "medium"
+                                                    ? "bg-amber-100 text-amber-700"
+                                                    : "bg-slate-100 text-slate-700"
+                                                }`}
+                                              >
+                                                {proposal.severity} severity
+                                              </span>
+                                            )}
+                                            {proposal.duplicateOf && (
+                                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-200 flex items-center gap-1">
+                                                <AlertTriangle className="w-3 h-3 text-amber-600" />
+                                                {proposal.duplicateOf}
+                                              </span>
+                                            )}
+                                            {proposal.status === "approved" && (
+                                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-green-100 text-green-800 flex items-center gap-1">
+                                                <CheckCircle2 className="w-3 h-3 text-green-600" />
+                                                Approved as {proposal.approvedId}
+                                              </span>
+                                            )}
+                                            {proposal.status === "rejected" && (
+                                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-200 text-slate-700">
+                                                Rejected
+                                              </span>
+                                            )}
+                                          </div>
+
+                                          {/* Proposal Title and Statement */}
+                                          {isEditing ? (
+                                            <div className="space-y-2 pt-1 bg-blue-50/50 p-3 rounded-lg border border-blue-200">
+                                              <label className="block text-[11px] font-bold text-slate-700">Edit Proposal Details</label>
+                                              <input
+                                                type="text"
+                                                value={editedProposalData.title ?? proposal.title}
+                                                onChange={(e) => setEditedProposalData({ ...editedProposalData, title: e.target.value })}
+                                                className="w-full px-2.5 py-1 text-xs rounded border border-slate-300 font-bold"
+                                                placeholder="Proposal Title"
+                                              />
+                                              <div>
+                                                <textarea
+                                                  rows={2}
+                                                  value={editedProposalData.text ?? proposal.text}
+                                                  onChange={(e) => {
+                                                    setEditedProposalData({ ...editedProposalData, text: e.target.value });
+                                                    setProposalEditError(null);
+                                                  }}
+                                                  className={`w-full px-2.5 py-1 text-xs rounded border font-medium ${
+                                                    proposalEditError ? "border-red-500 ring-1 ring-red-500" : "border-slate-300"
+                                                  }`}
+                                                  placeholder="Policy instruction or fact statement"
+                                                />
+                                                {proposalEditError && (
+                                                  <p className="text-[11px] font-bold text-red-600 flex items-center gap-1 mt-1">
+                                                    <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-red-600" />
+                                                    <span>{proposalEditError}</span>
+                                                  </p>
+                                                )}
+                                              </div>
+                                              {proposal.type === "rule" && (
+                                                <div className="flex items-center gap-3">
+                                                  <label className="text-[11px] font-bold text-slate-600">Severity:</label>
+                                                  <select
+                                                    value={editedProposalData.severity ?? proposal.severity}
+                                                    onChange={(e) => setEditedProposalData({ ...editedProposalData, severity: e.target.value })}
+                                                    className="px-2 py-1 text-xs rounded border border-slate-300"
+                                                  >
+                                                    <option value="high">High</option>
+                                                    <option value="medium">Medium</option>
+                                                    <option value="low">Low</option>
+                                                  </select>
+                                                </div>
+                                              )}
+                                              <div className="flex items-center gap-2 pt-1">
+                                                <button
+                                                  type="button"
+                                                  disabled={Boolean(savingProposalId)}
+                                                  onClick={() => handleProposalDecision(proposal.id, "edit_and_approve", editedProposalData)}
+                                                  className="px-3 py-1 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white rounded text-xs font-bold shadow-2xs flex items-center gap-1.5"
+                                                >
+                                                  {isSavingThis ? (
+                                                    <>
+                                                      <RefreshCw className="w-3 h-3 animate-spin" />
+                                                      <span>Saving...</span>
+                                                    </>
+                                                  ) : (
+                                                    "Save & Approve"
+                                                  )}
+                                                </button>
+                                                <button
+                                                  type="button"
+                                                  disabled={Boolean(savingProposalId)}
+                                                  onClick={() => {
+                                                    setEditingProposalId(null);
+                                                    setEditedProposalData({});
+                                                    setProposalEditError(null);
+                                                  }}
+                                                  className="px-2.5 py-1 text-slate-600 hover:text-slate-800 text-xs font-medium"
+                                                >
+                                                  Cancel
+                                                </button>
+                                              </div>
+                                            </div>
+                                          ) : (
+                                            <>
+                                              <h4 className="text-sm font-bold text-slate-900">{proposal.title}</h4>
+                                              <p className="text-xs text-slate-800 font-medium bg-slate-50 p-2.5 rounded-lg border border-slate-200">
+                                                {proposal.text}
+                                              </p>
+                                            </>
+                                          )}
+
+                                          {/* Verbatim Source Sentence in Context */}
+                                          {proposal.excerpt && (
+                                            <div className="text-[11px] text-slate-600 bg-slate-50/70 p-2.5 rounded-lg border border-slate-200/70">
+                                              <span className="font-bold text-slate-700 block mb-1">Source sentence in context:</span>
+                                              <div className="font-mono text-slate-700 text-[11px]">
+                                                <span>{proposal.excerpt.before}</span>
+                                                <mark className="bg-amber-200/90 text-slate-900 px-1 py-0.5 rounded font-bold mx-0.5">
+                                                  {proposal.excerpt.match}
+                                                </mark>
+                                                <span>{proposal.excerpt.after}</span>
+                                              </div>
+                                            </div>
+                                          )}
+                                        </div>
+
+                                        {/* Actions Column */}
+                                        <div className="flex sm:flex-col items-center gap-2 shrink-0">
+                                          {proposal.status === "pending" && !isEditing && (
+                                            isSavingThis ? (
+                                              <div className="w-full px-3 py-2 bg-blue-50 text-blue-700 text-xs font-bold rounded-lg border border-blue-200 flex items-center justify-center gap-1.5 animate-pulse">
+                                                <RefreshCw className="w-3.5 h-3.5 animate-spin text-blue-600" />
+                                                <span>Saving...</span>
+                                              </div>
+                                            ) : (
+                                              <>
+                                                <button
+                                                  type="button"
+                                                  disabled={Boolean(savingProposalId)}
+                                                  onClick={() => handleProposalDecision(proposal.id, "approve")}
+                                                  className="w-full px-3 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-bold rounded-lg transition-all shadow-2xs flex items-center justify-center gap-1.5"
+                                                >
+                                                  <Check className="w-3.5 h-3.5" />
+                                                  Approve
+                                                </button>
+                                                <button
+                                                  type="button"
+                                                  disabled={Boolean(savingProposalId)}
+                                                  onClick={() => {
+                                                    setEditingProposalId(proposal.id);
+                                                    setProposalEditError(null);
+                                                    setEditedProposalData({
+                                                      title: proposal.title,
+                                                      text: proposal.text,
+                                                      category: proposal.category,
+                                                      severity: proposal.severity
+                                                    });
+                                                  }}
+                                                  className="w-full px-3 py-1.5 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 text-slate-700 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-1.5"
+                                                >
+                                                  <Edit3 className="w-3.5 h-3.5" />
+                                                  Edit & Approve
+                                                </button>
+                                                <button
+                                                  type="button"
+                                                  disabled={Boolean(savingProposalId)}
+                                                  onClick={() => handleProposalDecision(proposal.id, "reject")}
+                                                  className="w-full px-3 py-1.5 bg-slate-50 hover:bg-red-50 disabled:opacity-50 text-slate-600 hover:text-red-700 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-1.5"
+                                                >
+                                                  <X className="w-3.5 h-3.5" />
+                                                  Reject
+                                                </button>
+                                              </>
+                                            )
+                                          )}
+
+                                          {proposal.status === "approved" && (
+                                            <div className="space-y-1 text-right">
+                                              <button
+                                                type="button"
+                                                disabled={Boolean(savingProposalId)}
+                                                onClick={() => handleUndoProposal(proposal.id)}
+                                                className="px-2.5 py-1 text-xs text-amber-700 hover:text-amber-900 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg font-bold flex items-center gap-1 disabled:opacity-50"
+                                                title="Rollback this approval and remove the item from the library"
+                                              >
+                                                {isSavingThis ? (
+                                                  <>
+                                                    <RefreshCw className="w-3 h-3 animate-spin" />
+                                                    <span>Saving...</span>
+                                                  </>
+                                                ) : (
+                                                  <>
+                                                    <RotateCcw className="w-3 h-3" />
+                                                    Undo Approval
+                                                  </>
+                                                )}
+                                              </button>
+                                              <p className="text-[10px] text-slate-400 italic text-right max-w-[140px]">
+                                                Also removable via table delete button below
+                                              </p>
+                                            </div>
+                                          )}
+
+                                          {proposal.status === "rejected" && (
+                                            <button
+                                              type="button"
+                                              disabled={Boolean(savingProposalId)}
+                                              onClick={() => handleProposalDecision(proposal.id, "pending")}
+                                              className="px-2.5 py-1 text-xs text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg font-medium disabled:opacity-50"
+                                            >
+                                              {isSavingThis ? "Saving..." : "Reconsider"}
+                                            </button>
+                                          )}
+                                        </div>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })()}
                   </div>
                 )}
               </div>

@@ -18,8 +18,10 @@ import { ACTIVE_MODEL, CANDIDATE_MODELS } from "./geminiService.js";
 const MAX_FILE_SIZE = 2 * 1024 * 1024; // 2 MB
 const MAX_TEXT_LENGTH = 15000; // 15,000 characters
 
+export const UNSUPPORTED_FILE_ERROR = "Unsupported file. Please upload .txt, .md, .docx or a text-based .pdf.";
+
 /**
- * Validates file buffer magic bytes.
+ * Validates file buffer magic bytes and content.
  */
 export function detectFileType(buffer) {
   if (!buffer || buffer.length === 0) {
@@ -49,19 +51,53 @@ export function detectFileType(buffer) {
     return { valid: true, type: "docx" };
   }
 
-  // 3. Reject binary files (images, exes, videos, archives other than docx)
-  // Check first 1024 bytes for null bytes (0x00)
+  // 3. Reject known binary/image file headers (PNG, JPEG, GIF, WebP, Executables)
+  const isPng = buffer.length >= 4 && buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47;
+  const isJpg = buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+  const isGif = buffer.length >= 3 && buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46;
+  const isExe = buffer.length >= 2 && buffer[0] === 0x4d && buffer[1] === 0x5a;
+  const isRiff = buffer.length >= 4 && buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46;
+
+  if (isPng || isJpg || isGif || isExe || isRiff) {
+    return {
+      valid: false,
+      error: UNSUPPORTED_FILE_ERROR
+    };
+  }
+
+  // 4. Reject binary files containing null bytes or binary control characters
   const checkLen = Math.min(buffer.length, 1024);
   for (let i = 0; i < checkLen; i++) {
-    if (buffer[i] === 0x00) {
+    const b = buffer[i];
+    if (b === 0x00 || (b < 0x09) || b === 0x0b || b === 0x0c || (b >= 0x0e && b <= 0x1f)) {
       return {
         valid: false,
-        error: "Unsupported binary file format. Please upload a .txt, .md, .docx, or text-based .pdf document."
+        error: UNSUPPORTED_FILE_ERROR
       };
     }
   }
 
   return { valid: true, type: "text" };
+}
+
+/**
+ * Validates edited proposal text:
+ * - Must not be empty or only whitespace
+ * - Must be at least 5 characters
+ * - Must not exceed 500 characters
+ */
+export function validateProposalEditText(text) {
+  if (text === undefined || text === null || typeof text !== "string") {
+    return { valid: false, error: "Rule text can't be empty" };
+  }
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.length < 5) {
+    return { valid: false, error: "Rule text can't be empty (minimum 5 characters)." };
+  }
+  if (text.length > 500) {
+    return { valid: false, error: "Rule text cannot exceed 500 characters." };
+  }
+  return { valid: true, text: trimmed };
 }
 
 /**

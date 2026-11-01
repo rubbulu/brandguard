@@ -29,7 +29,8 @@ import {
   scanDocumentSecurity,
   validateProposals,
   getNextId,
-  callGeminiGuidelineExtraction
+  callGeminiGuidelineExtraction,
+  validateProposalEditText
 } from "./guidelineService.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -295,7 +296,12 @@ app.post("/api/guidelines/extract", async (req, res) => {
       existingFacts: req.workspace.facts || []
     });
 
-    const effectiveSourceName = fileName || sourceName || "Pasted guideline text";
+    let effectiveSourceName = sourceName || fileName || "Pasted text";
+    if (sourceName === "Sample guideline" || fileName === "sample-brand-guideline.txt") {
+      effectiveSourceName = "Sample guideline";
+    } else if (!fileName && (!sourceName || sourceName.includes("Pasted"))) {
+      effectiveSourceName = "Pasted text";
+    }
 
     const keptWithMetadata = validated.kept.map(p => ({
       ...p,
@@ -355,10 +361,10 @@ app.post("/api/guidelines/proposals/:id/decide", (req, res) => {
     return res.status(404).json({ error: `Proposal "${proposalId}" not found.` });
   }
 
-  // Prevent double-click duplicates
-  if (proposal.status === "approved" && (action === "approve" || action === "edit_and_approve")) {
+  // Prevent double-click duplicates: ignore second decision on already decided proposal
+  if (proposal.status === "approved" || proposal.status === "rejected") {
     return res.json({
-      message: "Proposal was already approved.",
+      message: `Proposal was already decided (${proposal.status}).`,
       proposal,
       rules: req.workspace.rules,
       facts: req.workspace.facts
@@ -366,11 +372,16 @@ app.post("/api/guidelines/proposals/:id/decide", (req, res) => {
   }
 
   if (action === "approve" || action === "edit_and_approve") {
-    if (editedData) {
-      if (editedData.title) proposal.title = editedData.title.trim();
-      if (editedData.text) proposal.text = editedData.text.trim();
-      if (editedData.category) proposal.category = editedData.category.toLowerCase();
-      if (editedData.severity && ["high", "medium", "low"].includes(editedData.severity.toLowerCase())) {
+    if (action === "edit_and_approve") {
+      const textToValidate = editedData?.text !== undefined ? editedData.text : proposal.text;
+      const validation = validateProposalEditText(textToValidate);
+      if (!validation.valid) {
+        return res.status(400).json({ error: validation.error });
+      }
+      proposal.text = validation.text;
+      if (editedData?.title) proposal.title = editedData.title.trim();
+      if (editedData?.category) proposal.category = editedData.category.toLowerCase();
+      if (editedData?.severity && ["high", "medium", "low"].includes(editedData.severity.toLowerCase())) {
         proposal.severity = editedData.severity.toLowerCase();
       }
     }
