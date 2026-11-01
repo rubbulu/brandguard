@@ -21,7 +21,7 @@ wordsWithSpaceAndDecimalsDiff.tokenize = function(value) {
 function isCopyRule(ruleId) {
   if (!ruleId || typeof ruleId !== "string") return false;
   const upper = ruleId.trim().toUpperCase();
-  return upper.startsWith("R-") || upper.startsWith("F-") || upper.startsWith("T-");
+  return upper.startsWith("R-") || upper.startsWith("F-") || upper.startsWith("T-") || upper === "SEC-01";
 }
 
 /**
@@ -176,8 +176,8 @@ export function computeRedlineChunks(originalText, finalText, findings = []) {
           start,
           end,
           quote: f.quote,
-          suggested_fix: f.action === "remove" ? "" : (f.suggested_fix && f.suggested_fix !== "Needs manual edit" ? f.suggested_fix : ""),
-          action: f.action,
+          suggested_fix: (f.action === "remove" || f.rule_id === "SEC-01" || !f.suggested_fix) ? "" : (f.suggested_fix !== "Needs manual edit" ? f.suggested_fix : ""),
+          action: (f.action === "remove" || f.rule_id === "SEC-01" || !f.suggested_fix || f.suggested_fix.trim() === "") ? "remove" : f.action,
           rule_id: f.rule_id
         });
       }
@@ -279,6 +279,15 @@ export default function RedlineDiff({
     return diffChunks.some(c => c.added || c.removed);
   }, [diffChunks]);
 
+  const acceptedDesignFixes = useMemo(() => {
+    return (Array.isArray(findings) ? findings : []).filter(
+      f => f && (f.status === "accepted" || f.status === "edited") && (
+        (f.rule_id || "").toUpperCase().startsWith("V-") ||
+        f.source === "contrast" || f.source === "palette" || f.source === "alt_text"
+      )
+    );
+  }, [findings]);
+
   return (
     <div className={`bg-slate-900 border border-slate-800 rounded-xl overflow-hidden ${className}`}>
       {/* Header bar with Mode Toggle & Legend */}
@@ -288,6 +297,10 @@ export default function RedlineDiff({
           {hasChanges ? (
             <span className="text-xs bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded-full font-medium">
               Modifications Applied
+            </span>
+          ) : acceptedDesignFixes.length > 0 ? (
+            <span className="text-xs bg-blue-500/10 text-blue-400 border border-blue-500/20 px-2 py-0.5 rounded-full font-medium flex items-center gap-1">
+              <Info className="w-3 h-3 text-blue-400" /> No text changes. {acceptedDesignFixes.length} design fix{acceptedDesignFixes.length > 1 ? "es" : ""} listed separately.
             </span>
           ) : (
             <span className="text-xs bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded-full font-medium flex items-center gap-1">

@@ -709,6 +709,7 @@ export async function retryClarificationAi({ workspace, requestId, apiKey }) {
       request.aiAvailable = true;
       request.aiReason = null;
       request.wordingSource = "ai";
+      request.isDemo = false;
       return { success: true, request, message: "AI suggestions generated successfully." };
     } else {
       const reason = normalizeAiFailureReason(validated.error);

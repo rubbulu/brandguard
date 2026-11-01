@@ -1022,9 +1022,13 @@ export default function App() {
         } else {
           showNotice("Revisions requested. Returned to creator queue.");
         }
+      } else {
+        const errJson = await res.json().catch(() => ({}));
+        showNotice(errJson.error || "Failed to submit reviewer decision");
       }
     } catch (e) {
       console.error(e);
+      showNotice(e.message || "Network error submitting decision");
     }
   };
 
@@ -1926,7 +1930,7 @@ export default function App() {
   const renderReplacementCopyList = (draft) => {
     if (!draft || !Array.isArray(draft.findings)) return null;
     const copyFindings = draft.findings.filter(
-      (f) => f && f.suggested_fix && f.rule_id !== "SEC-01" && f.source !== "security" && !["V-01", "V-02", "V-03"].includes(f.rule_id) && f.source !== "contrast" && f.source !== "palette" && f.source !== "alt_text"
+      (f) => f && f.rule_id !== "SEC-01" && f.source !== "security" && !["V-01", "V-02", "V-03", "V-04"].includes(f.rule_id) && f.source !== "contrast" && f.source !== "palette" && f.source !== "alt_text"
     );
     if (copyFindings.length === 0) return null;
 
@@ -1947,7 +1951,10 @@ export default function App() {
 
         <div className="space-y-2">
           {copyFindings.map((f, i) => {
-            const designerLine = `Change "${f.quote || ""}" to "${f.suggested_fix || ""}"`;
+            const isRemoval = !f.suggested_fix || f.suggested_fix.trim() === "" || f.action === "remove";
+            const designerLine = isRemoval
+              ? `Remove phrase "${f.quote || ""}"`
+              : `Change "${f.quote || ""}" to "${f.suggested_fix || ""}"`;
             const isCopied = copiedItem === `copy-${f.id || i}`;
 
             return (
@@ -1957,8 +1964,14 @@ export default function App() {
               >
                 <div className="font-mono text-slate-800 leading-snug">
                   <span className="text-red-700 font-bold line-through mr-1">"{f.quote || ""}"</span>
-                  <span className="text-slate-400 font-sans mr-1">&rarr;</span>
-                  <span className="text-emerald-700 font-bold">"{f.suggested_fix || ""}"</span>
+                  {isRemoval ? (
+                    <span className="text-rose-600 font-semibold">[Remove phrase]</span>
+                  ) : (
+                    <>
+                      <span className="text-slate-400 font-sans mr-1">&rarr;</span>
+                      <span className="text-emerald-700 font-bold">"{f.suggested_fix || ""}"</span>
+                    </>
+                  )}
                   <span className="text-[10px] text-slate-400 font-sans ml-2">[{f.rule_id}]</span>
                 </div>
                 <button
@@ -3075,14 +3088,14 @@ export default function App() {
                                     <div className="space-y-2">
                                       <div className="flex items-center justify-between">
                                         <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                                          {request.wordingSource === "demo" || request.isDemo ? "Demo Wordings" : "AI-suggested Wordings"} ({request.suggestedWordings.length}):
+                                          {request.wordingSource === "ai" || (!request.isDemo && request.wordingSource !== "demo") ? "AI-suggested Wordings" : "Demo Wordings"} ({request.suggestedWordings.length}):
                                         </span>
                                         <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                                          request.wordingSource === "demo" || request.isDemo
-                                            ? "bg-purple-100 text-purple-800"
-                                            : "bg-blue-100 text-blue-800"
+                                          request.wordingSource === "ai" || (!request.isDemo && request.wordingSource !== "demo")
+                                            ? "bg-blue-100 text-blue-800"
+                                            : "bg-purple-100 text-purple-800"
                                         }`}>
-                                          {request.wordingSource === "demo" || request.isDemo ? "Demo wording" : "AI-suggested"}
+                                          {request.wordingSource === "ai" || (!request.isDemo && request.wordingSource !== "demo") ? "AI-suggested" : "Demo wording"}
                                         </span>
                                       </div>
                                       <div className="space-y-2">
@@ -3094,11 +3107,11 @@ export default function App() {
                                             <div className="flex items-center gap-2 flex-1">
                                               <span className="text-slate-800 font-medium">"{wording}"</span>
                                               <span className={`px-1.5 py-0.2 rounded text-[9px] font-bold shrink-0 ${
-                                                request.wordingSource === "demo" || request.isDemo
-                                                  ? "bg-purple-50 text-purple-700 border border-purple-200"
-                                                  : "bg-blue-50 text-blue-700 border border-blue-200"
+                                                request.wordingSource === "ai" || (!request.isDemo && request.wordingSource !== "demo")
+                                                  ? "bg-blue-50 text-blue-700 border border-blue-200"
+                                                  : "bg-purple-50 text-purple-700 border border-purple-200"
                                               }`}>
-                                                {request.wordingSource === "demo" || request.isDemo ? "Demo wording" : "AI-suggested"}
+                                                {request.wordingSource === "ai" || (!request.isDemo && request.wordingSource !== "demo") ? "AI-suggested" : "Demo wording"}
                                               </span>
                                             </div>
                                             <div className="flex items-center gap-2 shrink-0">
@@ -4722,6 +4735,32 @@ export default function App() {
                           </p>
                         </div>
 
+                        {/* Design changes required list (showing accepted design fixes V-01 to V-04) */}
+                        {activeDraft.findings && activeDraft.findings.some(f => (f.status === "accepted" || f.status === "edited") && (
+                          (f.rule_id || "").toUpperCase().startsWith("V-") || f.source === "contrast" || f.source === "palette" || f.source === "alt_text"
+                        )) && (
+                          <div className="p-3.5 bg-purple-50/60 rounded-xl border border-purple-200">
+                            <div className="flex items-center gap-2 mb-1.5">
+                              <Palette className="w-4 h-4 text-purple-700" />
+                              <span className="text-[10px] font-bold text-purple-900 uppercase tracking-wider">
+                                Design changes required ({activeDraft.findings.filter(f => (f.status === "accepted" || f.status === "edited") && (
+                                  (f.rule_id || "").toUpperCase().startsWith("V-") || f.source === "contrast" || f.source === "palette" || f.source === "alt_text"
+                                )).length})
+                              </span>
+                            </div>
+                            <ul className="list-disc list-inside space-y-1 text-xs text-purple-950">
+                              {activeDraft.findings.filter(f => (f.status === "accepted" || f.status === "edited") && (
+                                (f.rule_id || "").toUpperCase().startsWith("V-") || f.source === "contrast" || f.source === "palette" || f.source === "alt_text"
+                              )).map((f, i) => (
+                                <li key={i}>
+                                  <span className="font-mono font-bold text-purple-700 mr-1">[{f.rule_id}]</span>
+                                  <span>{f.suggested_fix || f.explanation || `Design instruction for ${f.rule_id}`}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+
                         {/* Word-Level Redline Diff */}
                         <RedlineDiff
                           originalText={activeDraft.originalText}
@@ -5041,6 +5080,11 @@ export default function App() {
                                     {finding.fix_rejection_reason || "Auto-fix was rejected for ungrammatical outcome. Please edit manually."}
                                   </p>
                                 </div>
+                              ) : (!finding.suggested_fix || finding.suggested_fix.trim() === "" || finding.action === "remove" || finding.rule_id === "SEC-01") ? (
+                                <p className="text-xs font-semibold text-rose-800 flex items-center gap-1.5">
+                                  <Trash2 className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                                  <span>Remove this phrase</span>
+                                </p>
                               ) : (
                                 <p className="text-xs font-semibold text-blue-900">
                                   "{finding.suggested_fix}"
@@ -5071,14 +5115,14 @@ export default function App() {
                                     disabled={isVisualAuditing || isReviewing}
                                     className="flex-1 py-1.5 px-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold flex items-center justify-center gap-1 transition-all focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-50"
                                   >
-                                    <Check className="w-3.5 h-3.5" /> {finding.rule_id === "SEC-01" ? "Accept Removal" : "Accept"}
+                                    <Check className="w-3.5 h-3.5" /> {(!finding.suggested_fix || finding.suggested_fix.trim() === "" || finding.action === "remove" || finding.rule_id === "SEC-01") ? "Accept Removal" : "Accept"}
                                   </button>
                                 )}
-                                {finding.rule_id !== "SEC-01" && finding.suggested_fix !== "Needs manual edit" && (
+                                {finding.suggested_fix !== "Needs manual edit" && (
                                   <button
                                     onClick={() => {
                                       setEditingFixId(finding.id);
-                                      setCustomFixText(finding.suggested_fix);
+                                      setCustomFixText(finding.suggested_fix || "");
                                     }}
                                     disabled={isVisualAuditing || isReviewing}
                                     className="py-1.5 px-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold flex items-center justify-center gap-1 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
@@ -5397,10 +5441,18 @@ export default function App() {
                     </div>
 
                     {/* Decision Controls: Approve or Request Changes */}
+                    {activeDraft?.findings?.some(f => (f.rule_id === "SEC-01" || f.source === "security") && (f.status === "pending" || !f.status)) && (
+                      <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 flex items-center gap-2 font-medium">
+                        <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                        <span>Approval blocked: Resolve the security finding first.</span>
+                      </div>
+                    )}
                     <div className="flex items-center gap-3 pt-3 border-t border-slate-100">
                       <button
                         onClick={() => handleReviewerDecision("approve")}
-                        className="flex-1 py-2 px-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all shadow-2xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        disabled={activeDraft?.findings?.some(f => (f.rule_id === "SEC-01" || f.source === "security") && (f.status === "pending" || !f.status))}
+                        className="flex-1 py-2 px-4 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all shadow-2xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        title={activeDraft?.findings?.some(f => (f.rule_id === "SEC-01" || f.source === "security") && (f.status === "pending" || !f.status)) ? "Resolve the security finding first" : "Approve Publication"}
                       >
                         <CheckCircle2 className="w-4 h-4" /> Approve Publication
                       </button>

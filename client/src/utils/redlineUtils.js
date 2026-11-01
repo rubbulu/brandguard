@@ -11,7 +11,7 @@
 export function isCopyRule(ruleId) {
   if (!ruleId || typeof ruleId !== "string") return false;
   const upper = ruleId.trim().toUpperCase();
-  return upper.startsWith("R-") || upper.startsWith("F-") || upper.startsWith("T-");
+  return upper.startsWith("R-") || upper.startsWith("F-") || upper.startsWith("T-") || upper === "SEC-01";
 }
 
 export function computeRedlineChunks(originalText, finalText, findings = []) {
@@ -54,8 +54,8 @@ export function computeRedlineChunks(originalText, finalText, findings = []) {
           start,
           end,
           quote: f.quote,
-          suggested_fix: f.action === "remove" ? "" : (f.suggested_fix && f.suggested_fix !== "Needs manual edit" ? f.suggested_fix : ""),
-          action: f.action,
+          suggested_fix: (f.action === "remove" || f.rule_id === "SEC-01" || !f.suggested_fix) ? "" : (f.suggested_fix !== "Needs manual edit" ? f.suggested_fix : ""),
+          action: (f.action === "remove" || f.rule_id === "SEC-01" || !f.suggested_fix || f.suggested_fix.trim() === "") ? "remove" : f.action,
           rule_id: f.rule_id
         });
       }

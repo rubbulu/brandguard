@@ -13,7 +13,8 @@ import {
   Bug,
   RotateCcw,
   BookOpen,
-  ArrowLeft
+  ArrowLeft,
+  Palette
 } from "lucide-react";
 
 export default function PublicVerifyPage({ certificateId, onBack }) {
@@ -83,7 +84,7 @@ export default function PublicVerifyPage({ certificateId, onBack }) {
       <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-6 text-slate-300">
         <RefreshCw className="w-8 h-8 text-blue-500 animate-spin mb-4" />
         <h2 className="text-lg font-semibold">Verifying Integrity with BrandGuard Server...</h2>
-        <p className="text-xs text-slate-500 mt-1">Recomputing SHA-256 payload hash and server HMAC signature</p>
+        <p className="text-xs text-slate-500 mt-1">Recomputing SHA-256 payload hash, copy digest, and server HMAC signature</p>
       </div>
     );
   }
@@ -125,6 +126,7 @@ export default function PublicVerifyPage({ certificateId, onBack }) {
 
   const cert = data?.certificate;
   const isVerified = data?.verified === true;
+  const isOverride = cert?.status === "Issued with override" || Boolean(cert?.securityOverride);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200 py-10 px-4 sm:px-6">
@@ -155,41 +157,51 @@ export default function PublicVerifyPage({ certificateId, onBack }) {
         {/* Main Verdict Card */}
         <div
           className={`p-6 sm:p-8 rounded-2xl border shadow-2xl transition-all ${
-            isVerified
-              ? "bg-slate-900/90 border-emerald-500/40 shadow-emerald-950/20"
-              : "bg-slate-900/90 border-red-500/50 shadow-red-950/30"
+            !isVerified
+              ? "bg-slate-900/90 border-red-500/50 shadow-red-950/30"
+              : isOverride
+              ? "bg-slate-900/90 border-amber-500/50 shadow-amber-950/30"
+              : "bg-slate-900/90 border-emerald-500/40 shadow-emerald-950/20"
           }`}
         >
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-slate-800">
             <div className="flex items-start gap-4">
               <div
                 className={`w-14 h-14 rounded-2xl flex items-center justify-center flex-shrink-0 ${
-                  isVerified ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/30" : "bg-red-500/10 text-red-400 border border-red-500/30"
+                  !isVerified
+                    ? "bg-red-500/10 text-red-400 border border-red-500/30"
+                    : isOverride
+                    ? "bg-amber-500/10 text-amber-400 border border-amber-500/30"
+                    : "bg-emerald-500/10 text-emerald-400 border border-emerald-500/30"
                 }`}
               >
-                {isVerified ? (
-                  <ShieldCheck className="w-8 h-8" />
-                ) : (
+                {!isVerified ? (
                   <ShieldAlert className="w-8 h-8" />
+                ) : isOverride ? (
+                  <AlertTriangle className="w-8 h-8" />
+                ) : (
+                  <ShieldCheck className="w-8 h-8" />
                 )}
               </div>
               <div>
                 <div className="flex items-center gap-2">
                   <h1 className="text-2xl font-extrabold text-white">
-                    {isVerified ? "VERIFIED" : "NOT VERIFIED"}
+                    {isVerified ? (isOverride ? "ISSUED WITH OVERRIDE" : "VERIFIED") : "NOT VERIFIED"}
                   </h1>
                   <span
                     className={`text-xs px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider ${
-                      isVerified
-                        ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
-                        : "bg-red-500/20 text-red-300 border border-red-500/30"
+                      !isVerified
+                        ? "bg-red-500/20 text-red-300 border border-red-500/30"
+                        : isOverride
+                        ? "bg-amber-500/20 text-amber-300 border border-amber-500/30"
+                        : "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
                     }`}
                   >
-                    {isVerified ? "Integrity-Verified" : "Tamper Detected"}
+                    {!isVerified ? "Tamper Detected" : (isOverride ? "Issued with override" : "Compliant")}
                   </span>
                 </div>
                 <p className="text-xs text-slate-400 mt-1">
-                  Verification Type: <span className="text-slate-300 font-medium">tamper-evident (signed by the server)</span>
+                  Verification Type: <span className="text-slate-300 font-medium">tamper-evident, signed by the server</span>
                 </p>
               </div>
             </div>
@@ -207,20 +219,28 @@ export default function PublicVerifyPage({ certificateId, onBack }) {
 
           {/* Status Message */}
           <div className="mt-6">
-            {isVerified ? (
-              <div className="p-4 rounded-xl bg-emerald-950/30 border border-emerald-500/30 text-emerald-200 text-xs sm:text-sm leading-relaxed flex items-start gap-3">
-                <CheckCircle2 className="w-5 h-5 text-emerald-400 flex-shrink-0 mt-0.5" />
-                <div>
-                  <span className="font-semibold block mb-0.5">Integrity Verification Succeeded</span>
-                  <span>{data.message}</span>
-                </div>
-              </div>
-            ) : (
+            {!isVerified ? (
               <div className="p-4 rounded-xl bg-red-950/40 border border-red-500/40 text-red-200 text-xs sm:text-sm leading-relaxed flex items-start gap-3">
                 <XCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
                 <div>
                   <span className="font-semibold block mb-0.5">Integrity Verification Failed</span>
                   <span>{data.reason}</span>
+                </div>
+              </div>
+            ) : isOverride ? (
+              <div className="p-4 rounded-xl bg-amber-950/40 border border-amber-500/40 text-amber-200 text-xs sm:text-sm leading-relaxed flex items-start gap-3">
+                <AlertTriangle className="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" />
+                <div>
+                  <span className="font-semibold block mb-0.5">Issued with Override: Security Finding Overridden</span>
+                  <span>{cert.securityOverride || "Security finding overridden by creator"}. Stored certificate record and signature are tamper-evident, signed by the server.</span>
+                </div>
+              </div>
+            ) : (
+              <div className="p-4 rounded-xl bg-emerald-950/30 border border-emerald-500/30 text-emerald-200 text-xs sm:text-sm leading-relaxed flex items-start gap-3">
+                <CheckCircle2 className="w-5 h-5 text-emerald-400 flex-shrink-0 mt-0.5" />
+                <div>
+                  <span className="font-semibold block mb-0.5">Integrity Verification Succeeded</span>
+                  <span>{data.message}</span>
                 </div>
               </div>
             )}
@@ -231,7 +251,7 @@ export default function PublicVerifyPage({ certificateId, onBack }) {
             <div>
               <div className="flex items-center gap-2 text-xs font-bold text-amber-400 uppercase tracking-wider">
                 <Bug className="w-4 h-4" />
-                <span>Hackathon Demo: Tamper Evident Proof Test</span>
+                <span>Hackathon Demo: Tamper-Evident Proof Test</span>
               </div>
               <p className="text-xs text-slate-400 mt-1">
                 Simulate an adversary altering 1 character in the approved record to observe instant signature verification failure.
@@ -280,6 +300,10 @@ export default function PublicVerifyPage({ certificateId, onBack }) {
                   <span className="text-slate-200 font-semibold">{cert.title} (v{cert.version})</span>
                 </div>
                 <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800">
+                  <span className="text-slate-500 block text-[11px]">Tone Profile Channel</span>
+                  <span className="text-slate-200 font-semibold">{cert.channel || "Web / Campaign"}</span>
+                </div>
+                <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800">
                   <span className="text-slate-500 block text-[11px]">Approval Timestamp (Server)</span>
                   <span className="text-slate-200 font-semibold">
                     {new Date(cert.approvedAt).toUTCString()}
@@ -288,6 +312,12 @@ export default function PublicVerifyPage({ certificateId, onBack }) {
                 <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800">
                   <span className="text-slate-500 block text-[11px]">Sign-off Reviewer</span>
                   <span className="text-slate-200 font-semibold">{cert.reviewerLabel}</span>
+                </div>
+                <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800">
+                  <span className="text-slate-500 block text-[11px]">Governance Status</span>
+                  <span className={`font-semibold ${isOverride ? "text-amber-400" : "text-emerald-400"}`}>
+                    {cert.status || "Compliant"}
+                  </span>
                 </div>
               </div>
 
@@ -301,6 +331,61 @@ export default function PublicVerifyPage({ certificateId, onBack }) {
                 </p>
               </div>
 
+              {/* Final Copy Hash (finalTextHash) */}
+              <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800 font-mono">
+                <span className="text-slate-500 block text-[11px] mb-0.5">Final Copy SHA-256 Digest (finalTextHash)</span>
+                <code className="text-emerald-400 break-all select-all text-xs">{cert.finalTextHash}</code>
+              </div>
+
+              {/* Design Instructions List (designInstructions) */}
+              {cert.designInstructions && cert.designInstructions.length > 0 && (
+                <div className="p-4 bg-purple-950/30 rounded-xl border border-purple-900/40 text-purple-200">
+                  <div className="flex items-center gap-2 mb-2">
+                    <Palette className="w-4 h-4 text-purple-400" />
+                    <span className="font-bold text-purple-300 uppercase tracking-wider text-[11px]">
+                      Design Changes Required ({cert.designInstructions.length})
+                    </span>
+                  </div>
+                  <ul className="list-disc list-inside space-y-1 text-xs">
+                    {cert.designInstructions.map((instruction, idx) => (
+                      <li key={idx} className="text-slate-300">
+                        {instruction}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* Findings Evaluated List (findingsList) */}
+              {cert.findingsList && cert.findingsList.length > 0 && (
+                <div className="p-4 bg-slate-950/60 rounded-xl border border-slate-800">
+                  <span className="text-slate-400 font-bold block mb-2 text-[11px] uppercase tracking-wider">
+                    Evaluated Findings ({cert.findingsList.length})
+                  </span>
+                  <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                    {cert.findingsList.map((f, idx) => (
+                      <div key={idx} className="p-2 bg-slate-900/80 rounded-lg border border-slate-800 flex items-center justify-between text-xs">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono font-bold text-blue-400 bg-slate-800 px-1.5 py-0.5 rounded text-[11px]">
+                            {f.rule_id} (v{f.ruleVersion})
+                          </span>
+                          <span className="px-1.5 py-0.2 rounded text-[10px] font-semibold uppercase tracking-wider bg-slate-800 text-slate-300">
+                            {f.type}
+                          </span>
+                        </div>
+                        <span className={`text-[10px] font-bold capitalize px-2 py-0.5 rounded ${
+                          f.status === "accepted" ? "bg-emerald-950 text-emerald-300 border border-emerald-800" :
+                          f.status === "edited" ? "bg-blue-950 text-blue-300 border border-blue-800" :
+                          "bg-rose-950 text-rose-300 border border-rose-800"
+                        }`}>
+                          {f.status}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Reviewer Note */}
               {cert.reviewerNote && (
                 <div className="p-3 bg-blue-950/30 rounded-xl border border-blue-900/40 text-blue-200">
@@ -313,7 +398,7 @@ export default function PublicVerifyPage({ certificateId, onBack }) {
               <div className="p-4 bg-slate-950/60 rounded-xl border border-slate-800">
                 <div className="flex items-center gap-2 mb-2">
                   <BookOpen className="w-4 h-4 text-emerald-400" />
-                  <span className="font-bold text-slate-300">Key Facts Cross-Referenced & Verified</span>
+                  <span className="font-bold text-slate-300">Key Facts Cross-Referenced &amp; Verified</span>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   {(cert.factsChecked || []).map(fId => (

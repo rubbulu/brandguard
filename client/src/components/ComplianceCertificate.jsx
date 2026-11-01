@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import QRCode from "qrcode";
 import {
   ShieldCheck,
+  ShieldAlert,
   Printer,
   Copy,
   Check,
@@ -12,9 +13,11 @@ import {
   FileCheck,
   Hash,
   AlertCircle,
+  AlertTriangle,
   FileText,
   Sparkles,
-  ArrowLeft
+  ArrowLeft,
+  Palette
 } from "lucide-react";
 import RedlineDiff from "./RedlineDiff";
 
@@ -25,11 +28,13 @@ export default function ComplianceCertificate({
   onOpenVerify
 }) {
   const [copiedHash, setCopiedHash] = useState(false);
+  const [copiedFinalHash, setCopiedFinalHash] = useState(false);
   const [copiedSig, setCopiedSig] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
   const [qrDataUrl, setQrDataUrl] = useState("");
 
   const cert = certificate || draft?.certificate;
+  const isOverride = cert?.status === "Issued with override" || Boolean(cert?.securityOverride);
   const verifyUrl = cert
     ? `${window.location.origin}/verify/${cert.certificateId}`
     : "";
@@ -70,6 +75,9 @@ export default function ComplianceCertificate({
       if (type === "hash") {
         setCopiedHash(true);
         setTimeout(() => setCopiedHash(false), 2000);
+      } else if (type === "finalHash") {
+        setCopiedFinalHash(true);
+        setTimeout(() => setCopiedFinalHash(false), 2000);
       } else if (type === "sig") {
         setCopiedSig(true);
         setTimeout(() => setCopiedSig(false), 2000);
@@ -99,7 +107,9 @@ export default function ComplianceCertificate({
             </button>
           )}
           <span className="text-sm text-slate-400 hidden sm:inline">
-            Status: <span className="text-emerald-400 font-semibold">Approved (v{cert.version})</span>
+            Status: <span className={isOverride ? "text-amber-400 font-semibold" : "text-emerald-400 font-semibold"}>
+              {cert.status || "Approved"} (v{cert.version})
+            </span>
           </span>
         </div>
 
@@ -149,21 +159,36 @@ export default function ComplianceCertificate({
                 Compliance Verification Certificate
               </h1>
               <p className="text-xs text-slate-600 mt-1">
-                Pre-Publication Brand Governance Record &bull; Tamper-Evident Server Signed
+                Pre-Publication Brand Governance Record &bull; Tamper-Evident, Signed by the Server
               </p>
             </div>
 
             {/* Integrity Badge */}
             <div className="flex flex-col items-end">
-              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
-                <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-                INTEGRITY-VERIFIED
+              <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold border ${
+                isOverride
+                  ? "bg-amber-100 text-amber-900 border-amber-300"
+                  : "bg-emerald-100 text-emerald-800 border border-emerald-300"
+              }`}>
+                <span className={`w-2 h-2 rounded-full ${isOverride ? "bg-amber-500" : "bg-emerald-500"}`}></span>
+                {isOverride ? "ISSUED WITH OVERRIDE" : "INTEGRITY-VERIFIED"}
               </span>
               <span className="text-[11px] font-mono text-slate-500 mt-1">
                 ID: {cert.certificateId.slice(0, 18)}...
               </span>
             </div>
           </div>
+
+          {/* Security Override Warning Banner */}
+          {isOverride && (
+            <div className="mt-4 p-3 bg-amber-50 border border-amber-300 rounded-xl flex items-start gap-2.5 text-amber-900 text-xs">
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <div>
+                <span className="font-bold block">Status: Issued with override</span>
+                <span>{cert.securityOverride || "Security finding overridden by creator"}. Stored record is tamper-evident, signed by the server.</span>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Certificate Metadata Grid */}
@@ -175,7 +200,7 @@ export default function ComplianceCertificate({
             </span>
           </div>
           <div>
-            <span className="text-slate-500 block">Version & Channel</span>
+            <span className="text-slate-500 block">Version &amp; Channel</span>
             <span className="font-semibold text-slate-900 block">
               v{cert.version} &bull; {cert.channel}
             </span>
@@ -233,7 +258,7 @@ export default function ComplianceCertificate({
               originalText={draft?.originalText || cert.finalText}
               finalText={cert.finalText}
               findings={draft?.findings || []}
-              title="Approved Changes & Policy Links"
+              title="Approved Changes &amp; Policy Links"
               defaultMode="inline"
               showToggle={false}
               className="bg-transparent border-0 text-slate-900"
@@ -251,6 +276,53 @@ export default function ComplianceCertificate({
           </div>
         </div>
 
+        {/* Design Changes Required List */}
+        {cert.designInstructions && cert.designInstructions.length > 0 && (
+          <div className="mb-6 p-4 rounded-xl bg-purple-50 border border-purple-200 text-xs">
+            <div className="flex items-center gap-2 mb-2">
+              <Palette className="w-4 h-4 text-purple-600" />
+              <h3 className="font-bold text-purple-900 uppercase tracking-wider text-[11px]">
+                Design Changes Required ({cert.designInstructions.length})
+              </h3>
+            </div>
+            <ul className="list-disc list-inside space-y-1 text-slate-800">
+              {cert.designInstructions.map((inst, i) => (
+                <li key={i}>{inst}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {/* Findings Evaluated List */}
+        {cert.findingsList && cert.findingsList.length > 0 && (
+          <div className="mb-6 text-xs">
+            <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">
+              Evaluated Governance Findings ({cert.findingsList.length})
+            </h2>
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1.5 max-h-48 overflow-y-auto">
+              {cert.findingsList.map((f, idx) => (
+                <div key={idx} className="p-2 bg-white rounded-lg border border-slate-200 flex items-center justify-between text-xs">
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono font-bold text-blue-700 bg-slate-100 px-1.5 py-0.5 rounded text-[11px]">
+                      {f.rule_id} (v{f.ruleVersion})
+                    </span>
+                    <span className="px-1.5 py-0.2 rounded text-[10px] font-semibold uppercase tracking-wider bg-slate-100 text-slate-600">
+                      {f.type}
+                    </span>
+                  </div>
+                  <span className={`text-[10px] font-bold capitalize px-2 py-0.5 rounded ${
+                    f.status === "accepted" ? "bg-emerald-100 text-emerald-800" :
+                    f.status === "edited" ? "bg-blue-100 text-blue-800" :
+                    "bg-rose-100 text-rose-800"
+                  }`}>
+                    {f.status}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Reviewer Note */}
         {cert.reviewerNote && (
           <div className="mb-6 p-4 rounded-xl bg-blue-50/60 border border-blue-200 text-xs">
@@ -262,7 +334,7 @@ export default function ComplianceCertificate({
         {/* Audited Policies & Facts */}
         <div className="mb-6 text-xs">
           <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">
-            Policies & Approved Facts Verified
+            Policies &amp; Approved Facts Verified
           </h2>
           <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
             <div className="flex flex-wrap gap-1.5 mb-2">
@@ -289,8 +361,28 @@ export default function ComplianceCertificate({
           <div className="space-y-3 flex-1 text-xs">
             <div className="flex items-center gap-2 text-emerald-400 font-bold uppercase tracking-wider text-[11px]">
               <FileCheck className="w-4 h-4" />
-              <span>Tamper-Evident Server Signed Record</span>
+              <span>Tamper-Evident, Signed by the Server</span>
             </div>
+
+            {/* Final Copy Hash */}
+            {cert.finalTextHash && (
+              <div>
+                <span className="text-slate-400 block text-[11px] mb-0.5">Final Copy Digest (SHA-256)</span>
+                <div className="flex items-center gap-2">
+                  <code className="font-mono text-[11px] text-emerald-300 bg-slate-950 px-2 py-1 rounded border border-slate-800 break-all select-all">
+                    {cert.finalTextHash}
+                  </code>
+                  <button
+                    type="button"
+                    onClick={() => handleCopy(cert.finalTextHash, "finalHash")}
+                    className="no-print p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 transition"
+                    title="Copy Final Copy Hash"
+                  >
+                    {copiedFinalHash ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* SHA-256 Content Hash */}
             <div>
@@ -357,7 +449,7 @@ export default function ComplianceCertificate({
         <div className="text-[11px] text-slate-500 mb-6 bg-slate-50 p-3 rounded-lg border border-slate-200 flex items-start gap-2">
           <Cpu className="w-4 h-4 text-slate-400 mt-0.5 flex-shrink-0" />
           <div>
-            <span className="font-bold text-slate-700">AI & Governance Tools Disclosure: </span>
+            <span className="font-bold text-slate-700">AI &amp; Governance Tools Disclosure: </span>
             <span>{cert.aiToolsDisclosure} Model: {cert.aiModel}.</span>
           </div>
         </div>

@@ -9,7 +9,7 @@
     "start": "node server/index.js",
     "server": "npm run dev --prefix server",
     "client": "npm run dev --prefix client",
-    "test": "node --test server/test/toneProfiles.test.js server/test/guidelineImport.test.js server/test/clarification.test.js"
+    "test": "node --test server/test/toneProfiles.test.js server/test/guidelineImport.test.js server/test/clarification.test.js server/test/fixesAndCertificates.test.js"
   },
   "keywords": ["brand-governance", "ai-validation", "gemini", "hackathon"],
   "author": "Mohammad Rubina Sultana",

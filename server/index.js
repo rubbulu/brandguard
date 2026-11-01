@@ -18,12 +18,17 @@ import { loadWorkspace, saveWorkspace, resetWorkspace } from "./workspaceStore.j
 import { runVisualAudit, clearVisualAuditCache } from "./visualAuditor.js";
 import { detectPromptInjection } from "./securityScanner.js";
 import {
+  tidySpacingAndPunctuation,
+  isCopyRule,
+  recomputeDraftText,
   createComplianceCertificate,
   getCertificateById,
   verifyCertificateIntegrity,
   tamperWithCertificate,
   restoreCertificate
 } from "./certificateService.js";
+
+export { tidySpacingAndPunctuation, isCopyRule, recomputeDraftText };
 import {
   extractDocumentText,
   scanDocumentSecurity,
@@ -1278,92 +1283,6 @@ app.patch("/api/drafts/:id/alt-text", (req, res) => {
   res.json({ draft });
 });
 
-// Helper: Check if a rule ID is a copy rule (R-, F-, T-)
-export function isCopyRule(ruleId) {
-  if (!ruleId || typeof ruleId !== "string") return false;
-  const upper = ruleId.trim().toUpperCase();
-  // Design fixes (V-01, V-02, etc.) are instructions for a designer, not copy changes.
-  // Only copy fixes (R-, F-, T-) change the text.
-  return upper.startsWith("R-") || upper.startsWith("F-") || upper.startsWith("T-");
-}
-
-// Helper: Recompute currentText from originalText and active accepted/edited findings
-// Replaces each accepted fix at its own position (using stored start/end offsets when available)
-// instead of the first text.replace match, so repeated phrases change only where accepted.
-// Design fixes (V-01, V-02) stay as design notes and never change text copy.
-// Only copy fixes (R-, F-, T-) change the text.
-export function recomputeDraftText(originalText, findings = []) {
-  if (!originalText || typeof originalText !== "string") return "";
-  if (!Array.isArray(findings) || findings.length === 0) return originalText;
-
-  // Active findings are accepted or edited copy fixes
-  const activeFindings = findings.filter(
-    f => (f.status === "accepted" || f.status === "edited") && isCopyRule(f.rule_id)
-  );
-  if (activeFindings.length === 0) return originalText;
-
-  // Track assigned start positions to handle multiple occurrences of the same quote
-  const usedOffsets = new Set();
-  const replacements = [];
-
-  for (const f of activeFindings) {
-    if (!f.quote) continue;
-
-    let start = typeof f.startIndex === "number" ? f.startIndex : (typeof f.start === "number" ? f.start : (typeof f.offset === "number" ? f.offset : -1));
-    let end = typeof f.endIndex === "number" ? f.endIndex : (typeof f.end === "number" ? f.end : -1);
-
-    // If offset is missing or invalid, locate position in originalText avoiding already used offsets
-    if (start < 0) {
-      let searchIdx = 0;
-      let foundIdx = -1;
-      while ((foundIdx = originalText.indexOf(f.quote, searchIdx)) !== -1) {
-        if (!usedOffsets.has(foundIdx)) {
-          break;
-        }
-        searchIdx = foundIdx + 1;
-      }
-      if (foundIdx !== -1) {
-        start = foundIdx;
-        end = foundIdx + f.quote.length;
-      }
-    }
-
-    if (start >= 0) {
-      if (end <= start) {
-        end = start + f.quote.length;
-      }
-      usedOffsets.add(start);
-
-      let replacementText = "";
-      if (f.action === "remove") {
-        replacementText = "";
-      } else if (f.suggested_fix && f.suggested_fix !== "Needs manual edit") {
-        replacementText = f.suggested_fix;
-      } else {
-        continue;
-      }
-
-      replacements.push({
-        start,
-        end,
-        quote: f.quote,
-        replacementText
-      });
-    }
-  }
-
-  // Sort replacements descending by start position (from right to left)
-  // This guarantees earlier character indices remain unchanged!
-  replacements.sort((a, b) => b.start - a.start);
-
-  let result = originalText;
-  for (const rep of replacements) {
-    result = result.slice(0, rep.start) + rep.replacementText + result.slice(rep.end);
-  }
-
-  return result;
-}
-
 // --- 7. Applying Finding Actions (Accept, Edit, Reject, Undo) ---
 app.patch("/api/drafts/:id/finding", (req, res) => {
   const { id } = req.params;
@@ -1397,12 +1316,15 @@ app.patch("/api/drafts/:id/finding", (req, res) => {
     finding.status = "accepted";
     draft.currentText = recomputeDraftText(draft.originalText, draft.findings);
     const isCopy = isCopyRule(finding.rule_id);
+    const isRemoval = !finding.suggested_fix || finding.suggested_fix.trim() === "" || finding.action === "remove" || finding.rule_id === "SEC-01";
     draft.history.push({
       id: `h-${Date.now()}`,
       timestamp: new Date().toISOString(),
       actor: "Creator",
       action: isCopy
-        ? `Accepted suggested fix for ${finding.rule_id}: replaced "${finding.quote}" with "${finding.suggested_fix}"`
+        ? (isRemoval
+            ? `Accepted removal of "${finding.quote}" [${finding.rule_id}]`
+            : `Accepted suggested fix for ${finding.rule_id}: replaced "${finding.quote}" with "${finding.suggested_fix}"`)
         : `Accepted design note for ${finding.rule_id}: "${finding.suggested_fix}"`
     });
   } else if (action === "edit") {
@@ -1478,6 +1400,14 @@ app.post("/api/drafts/:id/decision", (req, res) => {
   }
 
   if (decision === "approve") {
+    // Check for pending SEC-01 finding
+    const secPending = (draft.findings || []).some(
+      f => (f.rule_id === "SEC-01" || f.source === "security") && (f.status === "pending" || !f.status)
+    );
+    if (secPending) {
+      return res.status(400).json({ error: "Resolve the security finding first" });
+    }
+
     draft.status = "approved";
     const noteSnippet = comment ? ` with note: "${comment.trim()}"` : "";
 

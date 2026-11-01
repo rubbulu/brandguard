@@ -31,28 +31,141 @@ export function canonicalizeJson(obj) {
   return "{" + keyVals.join(",") + "}";
 }
 
-function isCopyRule(ruleId) {
-  if (!ruleId || typeof ruleId !== "string") return false;
-  const upper = ruleId.trim().toUpperCase();
-  return upper.startsWith("R-") || upper.startsWith("F-") || upper.startsWith("T-");
+/**
+ * Tidies spacing and punctuation after phrase removals:
+ * - Collapses multiple spaces to single space
+ * - Removes space before punctuation (.,!?:;)
+ * - Cleans orphaned punctuation before sentence ends (e.g. ",.")
+ * - Collapses multiple consecutive commas
+ * - Trims line starts and ends
+ * - Capitalizes the sentence start if needed
+ */
+export function tidySpacingAndPunctuation(text) {
+  if (typeof text !== "string") return "";
+  let s = text;
+
+  // 1. Remove space before punctuation (.,!?:;)
+  s = s.replace(/[ \t]+([,.:;!?])/g, "$1");
+
+  // 2. Remove orphaned commas/colons/semicolons before end punctuation
+  s = s.replace(/[,;:]\s*([.!?])/g, "$1");
+
+  // 3. Collapse multiple consecutive commas e.g. ", ," -> ","
+  s = s.replace(/,([ \t]*,)+/g, ",");
+
+  // 4. Collapse multiple spaces and tabs to single space
+  s = s.replace(/[ \t]{2,}/g, " ");
+
+  // 5. Remove space at line starts/ends
+  s = s.replace(/^[ \t]+/gm, "").replace(/[ \t]+$/gm, "");
+
+  // 6. Clean empty lines with only punctuation or whitespace
+  s = s.replace(/^\s*[\r\n]/gm, "");
+
+  // 7. Capitalize first letter of entire text if it's a lower case letter
+  s = s.replace(/^([a-z])/, (match, p1) => p1.toUpperCase());
+
+  // 8. Capitalize sentence start after [.!?]\s+ or \n+\s*
+  s = s.replace(/([.!?]\s+)([a-z])/g, (match, p1, p2) => p1 + p2.toUpperCase());
+  s = s.replace(/(\n+[ \t]*)([a-z])/g, (match, p1, p2) => p1 + p2.toUpperCase());
+
+  return s.trim();
 }
 
-function recomputeApprovedCopy(originalText, findings = []) {
-  let text = originalText || "";
-  for (const f of findings) {
-    if ((f.status === "accepted" || f.status === "edited") && isCopyRule(f.rule_id)) {
-      if (f.action === "remove") {
-        if (text && text.includes(f.quote)) {
-          text = text.replace(f.quote, "").trim();
+/**
+ * Checks if a rule ID is a copy rule (R-, F-, T-) or security line removal (SEC-01).
+ * Design fixes (V-01, V-02, etc.) are instructions for a designer and never tag text changes.
+ */
+export function isCopyRule(ruleId) {
+  if (!ruleId || typeof ruleId !== "string") return false;
+  const upper = ruleId.trim().toUpperCase();
+  return upper.startsWith("R-") || upper.startsWith("F-") || upper.startsWith("T-") || upper === "SEC-01";
+}
+
+/**
+ * Recomputes draft text from originalText and active accepted/edited findings.
+ * Replaces each accepted fix at its own position (using stored start/end offsets when available)
+ * instead of the first text.replace match, so repeated phrases change only where accepted.
+ * Removes phrases cleanly and tidies spacing/punctuation if removals took place.
+ */
+export function recomputeDraftText(originalText, findings = []) {
+  if (!originalText || typeof originalText !== "string") return "";
+  if (!Array.isArray(findings) || findings.length === 0) return originalText;
+
+  // Active findings are accepted or edited copy fixes (including SEC-01)
+  const activeFindings = findings.filter(
+    f => (f.status === "accepted" || f.status === "edited") && isCopyRule(f.rule_id)
+  );
+  if (activeFindings.length === 0) return originalText;
+
+  // Track assigned start positions to handle multiple occurrences of the same quote
+  const usedOffsets = new Set();
+  const replacements = [];
+
+  for (const f of activeFindings) {
+    if (!f.quote) continue;
+
+    let start = typeof f.startIndex === "number" ? f.startIndex : (typeof f.start === "number" ? f.start : (typeof f.offset === "number" ? f.offset : -1));
+    let end = typeof f.endIndex === "number" ? f.endIndex : (typeof f.end === "number" ? f.end : -1);
+
+    // If offset is missing or invalid, locate position in originalText avoiding already used offsets
+    if (start < 0) {
+      let searchIdx = 0;
+      let foundIdx = -1;
+      while ((foundIdx = originalText.indexOf(f.quote, searchIdx)) !== -1) {
+        if (!usedOffsets.has(foundIdx)) {
+          break;
         }
-      } else if (f.suggested_fix && f.suggested_fix !== "Needs manual edit") {
-        if (text && text.includes(f.quote)) {
-          text = text.replace(f.quote, f.suggested_fix);
-        }
+        searchIdx = foundIdx + 1;
+      }
+      if (foundIdx !== -1) {
+        start = foundIdx;
+        end = foundIdx + f.quote.length;
       }
     }
+
+    if (start >= 0) {
+      if (end <= start) {
+        end = start + f.quote.length;
+      }
+      usedOffsets.add(start);
+
+      let replacementText = "";
+      if (f.action === "remove" || !f.suggested_fix || f.suggested_fix.trim() === "" || f.rule_id === "SEC-01") {
+        replacementText = "";
+      } else if (f.suggested_fix && f.suggested_fix !== "Needs manual edit") {
+        replacementText = f.suggested_fix;
+      } else {
+        continue;
+      }
+
+      replacements.push({
+        start,
+        end,
+        quote: f.quote,
+        replacementText
+      });
+    }
   }
-  return text;
+
+  // Sort replacements descending by start position (from right to left)
+  // This guarantees earlier character indices remain unchanged!
+  replacements.sort((a, b) => b.start - a.start);
+
+  let result = originalText;
+  let hasRemoval = false;
+  for (const rep of replacements) {
+    if (rep.replacementText === "") {
+      hasRemoval = true;
+    }
+    result = result.slice(0, rep.start) + rep.replacementText + result.slice(rep.end);
+  }
+
+  if (hasRemoval) {
+    result = tidySpacingAndPunctuation(result);
+  }
+
+  return result;
 }
 
 /**
@@ -66,25 +179,62 @@ export function createComplianceCertificate({
 }) {
   const certificateId = `cert_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
   const approvedAt = new Date().toISOString();
-  // Only copy fixes (R-, F-, T-) change text; design fixes (V-01, V-02) stay as design notes
+
+  // Final text computation: uses recomputeDraftText to ensure all accepted copy & SEC-01 removals are applied
   const finalText = (
-    recomputeApprovedCopy(draft.originalText, draft.findings || []) ||
+    recomputeDraftText(draft.originalText, draft.findings || []) ||
     draft.currentText ||
     draft.originalText ||
     ""
   ).trim();
+
+  const finalTextHash = crypto.createHash("sha256").update(finalText).digest("hex");
   const originalText = (draft.originalText || "").trim();
   const originalTextHash = crypto.createHash("sha256").update(originalText).digest("hex");
 
+  // Security finding check
+  const findings = draft.findings || [];
+  const secFinding = findings.find(f => f.rule_id === "SEC-01" || f.source === "security");
+  const isSecOverridden = secFinding && secFinding.status === "rejected";
+  const status = isSecOverridden ? "Issued with override" : "Compliant";
+  const securityOverride = isSecOverridden ? "Security finding overridden by creator" : null;
+
+  // Tone profile channel
+  const channel = draft.channel || "Web / Campaign";
+
   // Collect checked rules and facts
-  const activeRules = [
+  const allWorkspaceRules = [
     ...(workspace.rules || []),
     ...(workspace.visualSettings?.rules || [])
-  ].map(r => ({ id: r.id, text: r.text }));
+  ];
 
+  const activeRules = allWorkspaceRules.map(r => ({ id: r.id, text: r.text }));
   const activeFacts = (workspace.facts || []).map(f => f.id);
 
-  const findings = draft.findings || [];
+  // Structured findings list (accepted, edited, rejected)
+  const findingsList = findings
+    .filter(f => f.status === "accepted" || f.status === "edited" || f.status === "rejected")
+    .map(f => {
+      const isDesign = (f.rule_id || "").toUpperCase().startsWith("V-") || f.source === "contrast" || f.source === "palette" || f.source === "alt_text";
+      const isRemoval = f.action === "remove" || !f.suggested_fix || f.suggested_fix.trim() === "" || f.rule_id === "SEC-01";
+      const type = isDesign ? "design" : (isRemoval ? "removal" : "text");
+      const matchedRule = allWorkspaceRules.find(r => r.id === f.rule_id);
+      return {
+        rule_id: f.rule_id,
+        type,
+        status: f.status,
+        ruleVersion: matchedRule?.version || 1
+      };
+    });
+
+  // Design instructions list from accepted/edited design findings
+  const designInstructions = findings
+    .filter(f =>
+      (f.status === "accepted" || f.status === "edited") &&
+      ((f.rule_id || "").toUpperCase().startsWith("V-") || f.source === "contrast" || f.source === "palette" || f.source === "alt_text")
+    )
+    .map(f => f.suggested_fix || f.explanation || `Design instruction for ${f.rule_id}`);
+
   const findingsSummary = {
     kept: findings.length,
     accepted: findings.filter(f => f.status === "accepted").length,
@@ -99,9 +249,14 @@ export function createComplianceCertificate({
     draftId: draft.id,
     version: draft.version || 1,
     title: draft.title || "Untitled Draft",
-    channel: draft.channel || "Web / Campaign",
+    channel,
+    status,
+    securityOverride,
     finalText,
+    finalTextHash,
     originalTextHash,
+    designInstructions,
+    findingsList,
     rulesChecked: activeRules,
     factsChecked: activeFacts,
     findingsSummary,
@@ -121,8 +276,8 @@ export function createComplianceCertificate({
     contentHash,
     signature,
     footnote: "This certificate proves the stored record has not changed since approval. It does not replace legal review.",
-    verificationType: "tamper-evident (signed by the server)",
-    integrityStatus: "integrity-verified"
+    verificationType: "tamper-evident, signed by the server",
+    integrityStatus: isSecOverridden ? "issued-with-override" : "integrity-verified"
   };
 
   // Persist certificate to disk for public /verify access
@@ -173,8 +328,13 @@ export function verifyCertificateIntegrity(cert) {
     version: cert.version,
     title: cert.title,
     channel: cert.channel,
+    status: cert.status,
+    securityOverride: cert.securityOverride,
     finalText: cert.finalText,
+    finalTextHash: cert.finalTextHash,
     originalTextHash: cert.originalTextHash,
+    designInstructions: cert.designInstructions || [],
+    findingsList: cert.findingsList || [],
     rulesChecked: cert.rulesChecked,
     factsChecked: cert.factsChecked,
     findingsSummary: cert.findingsSummary,
@@ -192,12 +352,19 @@ export function verifyCertificateIntegrity(cert) {
   const hashMatches = recomputedHash === cert.contentHash;
   const signatureMatches = recomputedSignature === cert.signature;
 
-  if (hashMatches && signatureMatches) {
+  // Verify finalText matches stored finalTextHash
+  const computedFinalTextHash = crypto.createHash("sha256").update(cert.finalText || "").digest("hex");
+  const finalTextHashMatches = !cert.finalTextHash || computedFinalTextHash === cert.finalTextHash;
+
+  if (hashMatches && signatureMatches && finalTextHashMatches) {
     return {
       verified: true,
-      status: "VERIFIED",
-      integrityStatus: "integrity-verified",
-      message: "Server signature matches stored record. The content, rules, and governance metadata are tamper-evident and unchanged since approval.",
+      status: cert.status || "Compliant",
+      securityOverride: cert.securityOverride || null,
+      integrityStatus: cert.status === "Issued with override" ? "issued-with-override" : "integrity-verified",
+      message: cert.status === "Issued with override"
+        ? "Server signature verified. Note: Issued with override (Security finding overridden by creator)."
+        : "Server signature matches stored record. The content, rules, and governance metadata are tamper-evident, signed by the server and unchanged since approval.",
       certificate: cert,
       recomputedHash,
       recomputedSignature
@@ -210,6 +377,9 @@ export function verifyCertificateIntegrity(cert) {
   }
   if (!signatureMatches) {
     reasons.push("HMAC-SHA256 signature verification failed against server signing key.");
+  }
+  if (!finalTextHashMatches) {
+    reasons.push("Final copy hash mismatch: finalText does not match stored finalTextHash.");
   }
 
   return {
