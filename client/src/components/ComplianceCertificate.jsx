@@ -282,7 +282,7 @@ export default function ComplianceCertificate({
             <div className="flex items-center gap-2 mb-2">
               <Palette className="w-4 h-4 text-purple-600" />
               <h3 className="font-bold text-purple-900 uppercase tracking-wider text-[11px]">
-                Design Changes Required ({cert.designInstructions.length})
+                Design changes required ({cert.designInstructions.length})
               </h3>
             </div>
             <ul className="list-disc list-inside space-y-1 text-slate-800">

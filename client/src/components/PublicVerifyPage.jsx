@@ -343,7 +343,7 @@ export default function PublicVerifyPage({ certificateId, onBack }) {
                   <div className="flex items-center gap-2 mb-2">
                     <Palette className="w-4 h-4 text-purple-400" />
                     <span className="font-bold text-purple-300 uppercase tracking-wider text-[11px]">
-                      Design Changes Required ({cert.designInstructions.length})
+                      Design changes required ({cert.designInstructions.length})
                     </span>
                   </div>
                   <ul className="list-disc list-inside space-y-1 text-xs">

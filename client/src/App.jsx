@@ -222,11 +222,23 @@ export default function App() {
   // Inline Edit Finding Fix
   const [editingFixId, setEditingFixId] = useState(null);
   const [customFixText, setCustomFixText] = useState("");
+  const [editFixError, setEditFixError] = useState("");
+  const [isFindingActionRunning, setIsFindingActionRunning] = useState(false);
   const [showValidatorDetails, setShowValidatorDetails] = useState(false);
 
   // Reviewer State
   const [reviewerComment, setReviewerComment] = useState("");
   const [isSavingNote, setIsSavingNote] = useState(false);
+  const [isSubmittingDecision, setIsSubmittingDecision] = useState(false);
+
+  // Sync active draft to sessionStorage for reliable refresh persistence
+  useEffect(() => {
+    try {
+      if (activeDraft?.id) {
+        sessionStorage.setItem("brandguard_active_draft_id", activeDraft.id);
+      }
+    } catch (e) {}
+  }, [activeDraft]);
 
   // Insights State
   const [insights, setInsights] = useState(null);
@@ -341,8 +353,18 @@ export default function App() {
         setAllDrafts(dList);
         if (dList.length > 0) {
           setActiveDraft((prev) => {
-            if (!prev) return null; // Never show a stored or demo draft as if it was just submitted: keep in Recent drafts list
-            const nextDraft = dList.find((d) => d.id === prev.id) || null;
+            let savedId = null;
+            try {
+              savedId = sessionStorage.getItem("brandguard_active_draft_id");
+            } catch (e) {}
+            const targetId = prev?.id || savedId;
+            if (!targetId) {
+              if (window.location.hash.includes("reviewer") && dList.length > 0) {
+                return dList[0];
+              }
+              return null;
+            }
+            const nextDraft = dList.find((d) => d.id === targetId) || (window.location.hash.includes("reviewer") && dList.length > 0 ? dList[0] : null);
             if (nextDraft && nextDraft.isVisual) {
               setCreatorMode("visual");
             }
@@ -748,6 +770,9 @@ export default function App() {
     try {
       const res = await wsFetch("/api/reset-workspace", { method: "POST" });
       if (res.ok) {
+        try {
+          sessionStorage.removeItem("brandguard_active_draft_id");
+        } catch (e) {}
         setDraftTitle("");
         setDraftContent("");
         setActiveDraft(null);
@@ -928,9 +953,10 @@ export default function App() {
     }
   };
 
-  // Finding Decision Actions (Accept, Edit, Reject, Undo)
+  // Finding Decision Actions (Accept, Edit, Remove, Reject, Undo)
   const handleFindingAction = async (findingId, action, customFix = null) => {
-    if (!activeDraft) return;
+    if (!activeDraft || isFindingActionRunning) return;
+    setIsFindingActionRunning(true);
     try {
       const res = await wsFetch(`/api/drafts/${activeDraft.id}/finding`, {
         method: "PATCH",
@@ -942,10 +968,18 @@ export default function App() {
         setActiveDraft(data.draft);
         setEditingFixId(null);
         setCustomFixText("");
+        setEditFixError("");
         await loadWorkspaceData();
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        if (action === "edit" && errData.error) {
+          setEditFixError(errData.error);
+        }
       }
     } catch (e) {
       console.error("Action error", e);
+    } finally {
+      setIsFindingActionRunning(false);
     }
   };
 
@@ -1000,7 +1034,8 @@ export default function App() {
 
   // Reviewer: Approve or Request Changes
   const handleReviewerDecision = async (decision) => {
-    if (!activeDraft) return;
+    if (!activeDraft || isSubmittingDecision) return;
+    setIsSubmittingDecision(true);
     try {
       const res = await wsFetch(`/api/drafts/${activeDraft.id}/decision`, {
         method: "POST",
@@ -1029,6 +1064,8 @@ export default function App() {
     } catch (e) {
       console.error(e);
       showNotice(e.message || "Network error submitting decision");
+    } finally {
+      setIsSubmittingDecision(false);
     }
   };
 
@@ -2014,17 +2051,17 @@ export default function App() {
   // Helper: Render Design Fixes (Visual contrast & colour fixes)
   const renderDesignFixesList = (draft) => {
     if (!draft || !Array.isArray(draft.findings)) return null;
-    const designFindings = draft.findings.filter(
-      (f) => f && (["V-01", "V-02"].includes(f.rule_id) || f.source === "contrast" || f.source === "palette")
+    const acceptedDesign = draft.findings.filter(
+      (f) => f && (f.status === "accepted" || f.status === "edited") && (["V-01", "V-02", "V-03", "V-04"].includes(f.rule_id) || (f.rule_id || "").toUpperCase().startsWith("V-") || f.source === "contrast" || f.source === "palette")
     );
-    if (designFindings.length === 0) return null;
+    if (acceptedDesign.length === 0) return null;
 
     return (
       <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs p-4 sm:p-5 space-y-3">
         <div className="flex items-center justify-between pb-2 border-b border-slate-100">
           <div className="flex items-center gap-2">
             <Palette className="w-4 h-4 text-purple-600" />
-            <h4 className="font-bold text-slate-900 text-sm">Design Fixes</h4>
+            <h4 className="font-bold text-slate-900 text-sm">Design changes required ({acceptedDesign.length})</h4>
           </div>
           <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-50 text-purple-700">
             Contrast &amp; Colour
@@ -2035,10 +2072,10 @@ export default function App() {
         </p>
 
         <div className="space-y-2">
-          {designFindings.map((f, i) => {
+          {acceptedDesign.map((f, i) => {
             const designLine = f.rule_id === "V-01"
               ? `Change text colour on "${f.quote || "text"}" to meet 4.5:1 minimum contrast ratio.`
-              : `Adjust background or accents to adhere to approved brand palette colours (${(visualSettings?.palette || []).join(", ")}).`;
+              : (f.suggested_fix || f.explanation || `Adjust background or accents to adhere to approved brand palette colours (${(visualSettings?.palette || []).join(", ")}).`);
             const isCopied = copiedItem === `design-${f.id || i}`;
 
             return (
@@ -2512,7 +2549,13 @@ export default function App() {
                 )}
 
                 {/* Review Queue Cards */}
-                {proposals.length > 0 && (
+                {proposals.length === 0 ? (
+                  <div className="pt-2">
+                    <div className="p-6 bg-slate-50 rounded-xl text-center text-xs text-slate-500 border border-dashed border-slate-200">
+                      No guideline proposals in queue. Paste text or upload a guideline document above to extract rules and facts.
+                    </div>
+                  </div>
+                ) : (
                   <div className="pt-2 space-y-4">
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-2 border-b border-slate-100">
                       <div>
@@ -3057,7 +3100,18 @@ export default function App() {
                                   <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-purple-200/60 mt-1">
                                     <div className="text-[11px] text-amber-800 font-medium flex items-center gap-1.5">
                                       <Info className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-                                      <span>{request.aiReason || "AI suggestions unavailable"}</span>
+                                      <span>
+                                        {(() => {
+                                          const isDemoInitial = (request.isDemo || request.wordingSource === "demo") && !request.aiReason;
+                                          if (isDemoInitial) {
+                                            return "Demo wording. Click Retry AI suggestions to generate AI wordings.";
+                                          }
+                                          if (request.aiReason) {
+                                            return `AI suggestions unavailable (${request.aiReason})`;
+                                          }
+                                          return "AI suggestions unavailable";
+                                        })()}
+                                      </span>
                                     </div>
                                     <button
                                       type="button"
@@ -3088,14 +3142,14 @@ export default function App() {
                                     <div className="space-y-2">
                                       <div className="flex items-center justify-between">
                                         <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                                          {request.wordingSource === "ai" || (!request.isDemo && request.wordingSource !== "demo") ? "AI-suggested Wordings" : "Demo Wordings"} ({request.suggestedWordings.length}):
+                                          {request.wordingSource === "ai" ? "AI-suggested Wordings" : "Demo Wordings"} ({request.suggestedWordings.length}):
                                         </span>
                                         <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                                          request.wordingSource === "ai" || (!request.isDemo && request.wordingSource !== "demo")
+                                          request.wordingSource === "ai"
                                             ? "bg-blue-100 text-blue-800"
                                             : "bg-purple-100 text-purple-800"
                                         }`}>
-                                          {request.wordingSource === "ai" || (!request.isDemo && request.wordingSource !== "demo") ? "AI-suggested" : "Demo wording"}
+                                          {request.wordingSource === "ai" ? "AI-suggested" : "Demo wording"}
                                         </span>
                                       </div>
                                       <div className="space-y-2">
@@ -3107,11 +3161,11 @@ export default function App() {
                                             <div className="flex items-center gap-2 flex-1">
                                               <span className="text-slate-800 font-medium">"{wording}"</span>
                                               <span className={`px-1.5 py-0.2 rounded text-[9px] font-bold shrink-0 ${
-                                                request.wordingSource === "ai" || (!request.isDemo && request.wordingSource !== "demo")
+                                                request.wordingSource === "ai"
                                                   ? "bg-blue-50 text-blue-700 border border-blue-200"
                                                   : "bg-purple-50 text-purple-700 border border-purple-200"
                                               }`}>
-                                                {request.wordingSource === "ai" || (!request.isDemo && request.wordingSource !== "demo") ? "AI-suggested" : "Demo wording"}
+                                                {request.wordingSource === "ai" ? "AI-suggested" : "Demo wording"}
                                               </span>
                                             </div>
                                             <div className="flex items-center gap-2 shrink-0">
@@ -3343,7 +3397,7 @@ export default function App() {
                     )}
 
                     {/* Collapsed Dismissed (N) List */}
-                    {dismissedClarificationsList.length > 0 && (
+                    {dismissedClarificationsList.length > 0 ? (
                       <div className="pt-2 border-t border-slate-200">
                         <button
                           type="button"
@@ -3399,6 +3453,10 @@ export default function App() {
                           </div>
                         )}
                       </div>
+                    ) : (
+                      <div className="pt-2 border-t border-slate-100 text-[11px] text-slate-400 italic">
+                        No dismissed clarifications.
+                      </div>
                     )}
                   </div>
                 </div>
@@ -3431,6 +3489,13 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 text-xs">
+                    {rules.length === 0 && (
+                      <tr>
+                        <td colSpan="5" className="py-6 px-4 text-center text-xs text-slate-400 italic">
+                          No rules in library. Add a rule below or import from guidelines above.
+                        </td>
+                      </tr>
+                    )}
                     {rules.map((rule) => (
                       <tr key={rule.id} className="hover:bg-slate-50/50 transition-colors">
                         <td className="py-3 px-4 font-mono font-bold text-blue-600">
@@ -3598,6 +3663,13 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 text-xs">
+                    {facts.length === 0 && (
+                      <tr>
+                        <td colSpan="3" className="py-6 px-4 text-center text-xs text-slate-400 italic">
+                          No verified facts in library. Add a fact below or import from guidelines above.
+                        </td>
+                      </tr>
+                    )}
                     {facts.map((fact) => (
                       <tr key={fact.id} className="hover:bg-slate-50/50 transition-colors">
                         <td className="py-3 px-4 font-mono font-bold text-purple-600">
@@ -4009,6 +4081,28 @@ export default function App() {
         {/* ========================================================================= */}
         {activeRole === "creator" && (
           <div className="space-y-6 animate-fade-in">
+            {/* First-time visitor / Start here guidance */}
+            {!activeDraft && (
+              <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200/80 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
+                <div className="flex items-center gap-3">
+                  <span className="px-2.5 py-1 bg-blue-600 text-white font-extrabold text-[11px] rounded-lg uppercase tracking-wider shrink-0 shadow-2xs">
+                    Start here
+                  </span>
+                  <p className="text-xs text-blue-950 font-medium">
+                    Paste copy or click <strong className="text-blue-800">Try Bad Banner</strong> (in Banner image mode) or select a sample draft below to test governance checks.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowGuideModal(true)}
+                  className="px-3.5 py-1.5 bg-white hover:bg-blue-50 text-blue-700 border border-blue-300 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-2xs shrink-0 self-start sm:self-auto"
+                >
+                  <HelpCircle className="w-3.5 h-3.5 text-blue-600" />
+                  <span>Open Guide</span>
+                </button>
+              </div>
+            )}
+
             {/* Mode Switcher Tabs */}
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-2.5 rounded-2xl border border-slate-200 shadow-2xs">
               <div className="flex items-center gap-2">
@@ -4567,20 +4661,53 @@ export default function App() {
               <ErrorBoundary onReset={() => { setActiveDraft(null); setCreatorMode("text"); handleLoadDemoScenario(); }}>
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
                 {/* Security Alert Strip for Prompt Injections */}
-                {activeDraft.findings?.some(f => f.rule_id === "SEC-01" || f.source === "security") && (
-                  <div className="lg:col-span-12 p-3.5 bg-red-600 text-white rounded-xl flex items-center justify-between shadow-xs">
-                    <div className="flex items-center gap-2.5">
-                      <AlertTriangle className="w-5 h-5 shrink-0 text-white" />
-                      <div>
-                        <span className="font-bold text-xs uppercase tracking-wider block">Security Alert: Prompt Injection Detected</span>
-                        <span className="text-xs text-red-100">Adversarial instructions attempting to instruct the reviewer were detected and must be removed.</span>
+                {(() => {
+                  const secFinding = activeDraft.findings?.find(f => f.rule_id === "SEC-01" || f.source === "security");
+                  if (!secFinding) return null;
+                  if (!secFinding.status || secFinding.status === "pending") {
+                    return (
+                      <div className="lg:col-span-12 p-3.5 bg-red-600 text-white rounded-xl flex items-center justify-between shadow-xs">
+                        <div className="flex items-center gap-2.5">
+                          <AlertTriangle className="w-5 h-5 shrink-0 text-white" />
+                          <div>
+                            <span className="font-bold text-xs uppercase tracking-wider block">SECURITY ALERT: PROMPT INJECTION DETECTED</span>
+                            <span className="text-xs text-red-100">Adversarial instructions attempting to instruct the reviewer were detected and must be removed.</span>
+                          </div>
+                        </div>
+                        <span className="text-[10px] font-bold px-2.5 py-1 bg-red-800 text-white rounded-full uppercase tracking-wider">
+                          Action Required
+                        </span>
                       </div>
-                    </div>
-                    <span className="text-[10px] font-bold px-2.5 py-1 bg-red-800 text-white rounded-full uppercase tracking-wider">
-                      Action Required
-                    </span>
-                  </div>
-                )}
+                    );
+                  }
+                  if (secFinding.status === "accepted") {
+                    return (
+                      <div className="lg:col-span-12 p-3 bg-emerald-50 border border-emerald-200 text-emerald-900 rounded-xl flex items-center justify-between shadow-xs">
+                        <div className="flex items-center gap-2.5">
+                          <CheckCircle2 className="w-5 h-5 shrink-0 text-emerald-600" />
+                          <span className="text-xs font-semibold">Security finding resolved: injected line removed</span>
+                        </div>
+                        <span className="text-[10px] font-bold px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded uppercase">
+                          Resolved
+                        </span>
+                      </div>
+                    );
+                  }
+                  if (secFinding.status === "rejected") {
+                    return (
+                      <div className="lg:col-span-12 p-3 bg-amber-50 border border-amber-200 text-amber-900 rounded-xl flex items-center justify-between shadow-xs">
+                        <div className="flex items-center gap-2.5">
+                          <AlertTriangle className="w-5 h-5 shrink-0 text-amber-600" />
+                          <span className="text-xs font-semibold">Security finding overridden by creator</span>
+                        </div>
+                        <span className="text-[10px] font-bold px-2 py-0.5 bg-amber-100 text-amber-800 rounded uppercase">
+                          Overridden
+                        </span>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
 
                 {/* Left Column: Visual Banner Review OR Text Copy Review */}
                 <div className="lg:col-span-7 bg-white rounded-2xl border border-slate-200 shadow-2xs p-5 sm:p-6 flex flex-col justify-between space-y-4">
@@ -4649,7 +4776,7 @@ export default function App() {
                             </span>
                             {activeDraft.hasLogo !== undefined && (
                               <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-200 text-slate-700 font-mono">
-                                {activeDraft.hasLogo ? "Brand Logo Detected" : "No logo detected"}
+                                {activeDraft.hasLogo ? "Brand Logo Detected (model-assisted)" : "No logo detected (model-assisted)"}
                               </span>
                             )}
                           </div>
@@ -4711,6 +4838,9 @@ export default function App() {
                                 <Save className="w-3 h-3" /> Save Alt Text
                               </button>
                             </div>
+                            <p className="text-[11px] text-slate-500 italic mt-1.5">
+                              Alt text is generated from the original banner and is not rewritten when fixes are accepted. Edit it before submitting.
+                            </p>
                           </div>
                         </div>
                       </div>
@@ -5048,19 +5178,46 @@ export default function App() {
                               <input
                                 type="text"
                                 value={customFixText}
-                                onChange={(e) => setCustomFixText(e.target.value)}
+                                onChange={(e) => {
+                                  setCustomFixText(e.target.value);
+                                  setEditFixError("");
+                                }}
                                 className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-500 font-medium"
                               />
-                              <div className="flex items-center gap-2">
+                              {editFixError && (
+                                <p className="text-xs text-red-600 font-medium">{editFixError}</p>
+                              )}
+                              <div className="flex flex-wrap items-center gap-2">
                                 <button
-                                  onClick={() => handleFindingAction(finding.id, "edit", customFixText)}
-                                  className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-[11px] font-bold focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                  type="button"
+                                  disabled={isFindingActionRunning}
+                                  onClick={() => {
+                                    if (!customFixText || !customFixText.trim()) {
+                                      setEditFixError("Replacement can't be empty. Use 'Remove this phrase' to delete it.");
+                                      return;
+                                    }
+                                    handleFindingAction(finding.id, "edit", customFixText);
+                                  }}
+                                  className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-[11px] font-bold focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
                                 >
-                                  Save &amp; Apply
+                                  {isFindingActionRunning ? "Saving..." : "Save & Apply"}
                                 </button>
                                 <button
-                                  onClick={() => setEditingFixId(null)}
-                                  className="px-2 py-1 text-slate-500 text-[11px]"
+                                  type="button"
+                                  disabled={isFindingActionRunning}
+                                  onClick={() => handleFindingAction(finding.id, "remove")}
+                                  className="px-2.5 py-1 bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 rounded text-[11px] font-bold focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50"
+                                >
+                                  Remove this phrase
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={isFindingActionRunning}
+                                  onClick={() => {
+                                    setEditingFixId(null);
+                                    setEditFixError("");
+                                  }}
+                                  className="px-2 py-1 text-slate-500 hover:text-slate-700 text-[11px]"
                                 >
                                   Cancel
                                 </button>
@@ -5102,8 +5259,9 @@ export default function App() {
                                     onClick={() => {
                                       setEditingFixId(finding.id);
                                       setCustomFixText("");
+                                      setEditFixError("");
                                     }}
-                                    disabled={isVisualAuditing || isReviewing}
+                                    disabled={isVisualAuditing || isReviewing || isFindingActionRunning}
                                     className="flex-1 py-1.5 px-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold flex items-center justify-center gap-1 transition-all focus:outline-none focus:ring-2 focus:ring-amber-500 disabled:opacity-50"
                                     title="Click to write manual replacement"
                                   >
@@ -5112,7 +5270,7 @@ export default function App() {
                                 ) : (
                                   <button
                                     onClick={() => handleFindingAction(finding.id, "accept")}
-                                    disabled={isVisualAuditing || isReviewing}
+                                    disabled={isVisualAuditing || isReviewing || isFindingActionRunning}
                                     className="flex-1 py-1.5 px-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold flex items-center justify-center gap-1 transition-all focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-50"
                                   >
                                     <Check className="w-3.5 h-3.5" /> {(!finding.suggested_fix || finding.suggested_fix.trim() === "" || finding.action === "remove" || finding.rule_id === "SEC-01") ? "Accept Removal" : "Accept"}
@@ -5123,8 +5281,9 @@ export default function App() {
                                     onClick={() => {
                                       setEditingFixId(finding.id);
                                       setCustomFixText(finding.suggested_fix || "");
+                                      setEditFixError("");
                                     }}
-                                    disabled={isVisualAuditing || isReviewing}
+                                    disabled={isVisualAuditing || isReviewing || isFindingActionRunning}
                                     className="py-1.5 px-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold flex items-center justify-center gap-1 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
                                   >
                                     <Edit3 className="w-3.5 h-3.5" /> Edit
@@ -5132,7 +5291,7 @@ export default function App() {
                                 )}
                                 <button
                                   onClick={() => handleFindingAction(finding.id, "reject")}
-                                  disabled={isVisualAuditing || isReviewing}
+                                  disabled={isVisualAuditing || isReviewing || isFindingActionRunning}
                                   className="py-1.5 px-2.5 bg-slate-100 hover:bg-red-50 hover:text-red-600 text-slate-500 rounded-lg text-xs font-bold focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50"
                                   title="Reject finding"
                                 >
@@ -5146,7 +5305,8 @@ export default function App() {
                                 </span>
                                 <button
                                   onClick={() => handleFindingAction(finding.id, "undo")}
-                                  className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold flex items-center gap-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                  disabled={isVisualAuditing || isReviewing || isFindingActionRunning}
+                                  className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold flex items-center gap-1 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
                                 >
                                   <RotateCcw className="w-3 h-3" /> Undo Decision
                                 </button>
@@ -5283,20 +5443,53 @@ export default function App() {
                   {activeDraft && (
                   <div className="lg:col-span-8 bg-white rounded-2xl border border-slate-200 shadow-2xs p-5 sm:p-6 space-y-5">
                     {/* Security Alert Strip for Reviewer */}
-                    {activeDraft.findings?.some(f => f.rule_id === "SEC-01" || f.source === "security") && (
-                      <div className="p-3.5 bg-red-600 text-white rounded-xl flex items-center justify-between shadow-xs">
-                        <div className="flex items-center gap-2.5">
-                          <AlertTriangle className="w-5 h-5 shrink-0 text-white" />
-                          <div>
-                            <span className="font-bold text-xs uppercase tracking-wider block">Security Alert: Prompt Injection Detected</span>
-                            <span className="text-xs text-red-100">Adversarial instructions attempting to instruct the reviewer were detected and must be removed.</span>
+                    {(() => {
+                      const secFinding = activeDraft.findings?.find(f => f.rule_id === "SEC-01" || f.source === "security");
+                      if (!secFinding) return null;
+                      if (!secFinding.status || secFinding.status === "pending") {
+                        return (
+                          <div className="p-3.5 bg-red-600 text-white rounded-xl flex items-center justify-between shadow-xs">
+                            <div className="flex items-center gap-2.5">
+                              <AlertTriangle className="w-5 h-5 shrink-0 text-white" />
+                              <div>
+                                <span className="font-bold text-xs uppercase tracking-wider block">SECURITY ALERT: PROMPT INJECTION DETECTED</span>
+                                <span className="text-xs text-red-100">Adversarial instructions attempting to instruct the reviewer were detected and must be removed.</span>
+                              </div>
+                            </div>
+                            <span className="text-[10px] font-bold px-2.5 py-1 bg-red-800 text-white rounded-full uppercase tracking-wider">
+                              Action Required
+                            </span>
                           </div>
-                        </div>
-                        <span className="text-[10px] font-bold px-2.5 py-1 bg-red-800 text-white rounded-full uppercase tracking-wider">
-                          Action Required
-                        </span>
-                      </div>
-                    )}
+                        );
+                      }
+                      if (secFinding.status === "accepted") {
+                        return (
+                          <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-900 rounded-xl flex items-center justify-between shadow-xs">
+                            <div className="flex items-center gap-2.5">
+                              <CheckCircle2 className="w-5 h-5 shrink-0 text-emerald-600" />
+                              <span className="text-xs font-semibold">Security finding resolved: injected line removed</span>
+                            </div>
+                            <span className="text-[10px] font-bold px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded uppercase">
+                              Resolved
+                            </span>
+                          </div>
+                        );
+                      }
+                      if (secFinding.status === "rejected") {
+                        return (
+                          <div className="p-3 bg-amber-50 border border-amber-200 text-amber-900 rounded-xl flex items-center justify-between shadow-xs">
+                            <div className="flex items-center gap-2.5">
+                              <AlertTriangle className="w-5 h-5 shrink-0 text-amber-600" />
+                              <span className="text-xs font-semibold">Security finding overridden by creator</span>
+                            </div>
+                            <span className="text-[10px] font-bold px-2 py-0.5 bg-amber-100 text-amber-800 rounded uppercase">
+                              Overridden
+                            </span>
+                          </div>
+                        );
+                      }
+                      return null;
+                    })()}
 
                     <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                       <div>
@@ -5334,7 +5527,7 @@ export default function App() {
                               </span>
                               {activeDraft.hasLogo !== undefined && (
                                 <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-200 text-slate-700 font-mono">
-                                  {activeDraft.hasLogo ? "Brand Logo Detected" : "No logo detected"}
+                                  {activeDraft.hasLogo ? "Brand Logo Detected (model-assisted)" : "No logo detected (model-assisted)"}
                                 </span>
                               )}
                             </div>
@@ -5400,21 +5593,34 @@ export default function App() {
                         Resolved Findings ({activeDraft.findings?.length || 0})
                       </h4>
                       <div className="space-y-1.5 max-h-48 overflow-y-auto">
-                        {activeDraft.findings?.map((f) => (
-                          <div key={f.id} className="p-2 bg-slate-50 rounded-lg border border-slate-200 flex items-center justify-between text-xs">
-                            <div className="flex items-center gap-2">
-                              <span className="font-mono font-bold text-blue-600 bg-white px-1.5 py-0.5 rounded border border-slate-200 text-[10px]">
-                                {f.rule_id}
-                              </span>
-                              <span className="text-slate-700">
-                                Replaced <strong className="text-red-700">"{f.quote}"</strong> &rarr; <strong className="text-emerald-700">"{f.suggested_fix}"</strong>
+                        {activeDraft.findings?.map((f) => {
+                          const isRemoval = f.action === "remove" || !f.suggested_fix || f.suggested_fix.trim() === "" || f.rule_id === "SEC-01";
+                          const displayStatus = f.status ? (f.status.charAt(0).toUpperCase() + f.status.slice(1)) : "Pending";
+                          return (
+                            <div key={f.id} className="p-2 bg-slate-50 rounded-lg border border-slate-200 flex items-center justify-between text-xs">
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono font-bold text-blue-600 bg-white px-1.5 py-0.5 rounded border border-slate-200 text-[10px]">
+                                  {f.rule_id}
+                                </span>
+                                <span className="text-slate-700">
+                                  {isRemoval ? (
+                                    <>Removed <strong className="text-red-700">"{f.quote}"</strong></>
+                                  ) : (
+                                    <>Replaced <strong className="text-red-700">"{f.quote}"</strong> &rarr; <strong className="text-emerald-700">"{f.suggested_fix}"</strong></>
+                                  )}
+                                </span>
+                              </div>
+                              <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${
+                                f.status === "accepted" ? "bg-emerald-100 text-emerald-800" :
+                                f.status === "edited" ? "bg-blue-100 text-blue-800" :
+                                f.status === "rejected" ? "bg-amber-100 text-amber-800" :
+                                "bg-slate-200 text-slate-600"
+                              }`}>
+                                {displayStatus}
                               </span>
                             </div>
-                            <span className="text-[10px] font-bold capitalize text-slate-500 bg-slate-200 px-2 py-0.5 rounded">
-                              {f.status || "pending"}
-                            </span>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     </div>
 
@@ -5450,22 +5656,23 @@ export default function App() {
                     <div className="flex items-center gap-3 pt-3 border-t border-slate-100">
                       <button
                         onClick={() => handleReviewerDecision("approve")}
-                        disabled={activeDraft?.findings?.some(f => (f.rule_id === "SEC-01" || f.source === "security") && (f.status === "pending" || !f.status))}
+                        disabled={isSubmittingDecision || activeDraft?.findings?.some(f => (f.rule_id === "SEC-01" || f.source === "security") && (f.status === "pending" || !f.status))}
                         className="flex-1 py-2 px-4 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all shadow-2xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
                         title={activeDraft?.findings?.some(f => (f.rule_id === "SEC-01" || f.source === "security") && (f.status === "pending" || !f.status)) ? "Resolve the security finding first" : "Approve Publication"}
                       >
-                        <CheckCircle2 className="w-4 h-4" /> Approve Publication
+                        <CheckCircle2 className="w-4 h-4" /> {isSubmittingDecision ? "Approving..." : "Approve Publication"}
                       </button>
                       <button
                         onClick={() => handleReviewerDecision("request_changes")}
-                        className="py-2 px-4 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all focus:outline-none focus:ring-2 focus:ring-amber-500"
+                        disabled={isSubmittingDecision}
+                        className="py-2 px-4 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all focus:outline-none focus:ring-2 focus:ring-amber-500 disabled:opacity-50"
                       >
-                        <AlertTriangle className="w-4 h-4 text-amber-600" /> Request Revisions
+                        <AlertTriangle className="w-4 h-4 text-amber-600" /> {isSubmittingDecision ? "Submitting..." : "Request Revisions"}
                       </button>
                     </div>
 
                     {/* Active Compliance Certificate Card */}
-                    {activeDraft.certificate && (
+                    {activeDraft.certificate ? (
                       <div className="p-3.5 bg-emerald-50/90 border border-emerald-300 rounded-xl flex items-center justify-between gap-3 shadow-xs">
                         <div className="flex items-center gap-2.5">
                           <div className="w-8 h-8 rounded-lg bg-emerald-600 text-white flex items-center justify-center shadow-xs">
@@ -5492,6 +5699,11 @@ export default function App() {
                           <FileText className="w-3.5 h-3.5" />
                           <span>View Certificate</span>
                         </button>
+                      </div>
+                    ) : (
+                      <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-500 flex items-center gap-2">
+                        <ShieldCheck className="w-4 h-4 text-slate-400 shrink-0" />
+                        <span>No certificate issued yet. Approve publication to generate a tamper-evident compliance certificate.</span>
                       </div>
                     )}
 
@@ -5531,6 +5743,16 @@ export default function App() {
                 Actionable analytics computed directly from your workspace drafts and user review decisions.
               </p>
             </div>
+
+            {(!insights || insights.draftsAnalysed === 0) && (
+              <div className="p-4 bg-blue-50/70 border border-blue-200 rounded-2xl flex items-center gap-3 text-xs text-blue-900 shadow-2xs">
+                <Info className="w-5 h-5 text-blue-600 shrink-0" />
+                <div>
+                  <span className="font-bold block">No drafts analysed yet</span>
+                  <span className="text-blue-700">Submit a marketing draft or upload a banner in Content Creator to start generating governance insights.</span>
+                </div>
+              </div>
+            )}
 
             {/* Metrics Cards Grid */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">

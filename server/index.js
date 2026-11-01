@@ -924,10 +924,24 @@ app.post("/api/drafts", (req, res) => {
     return res.status(400).json({ error: "Content is required." });
   }
 
+  // Double Submit prevention: ignore rapid repeat requests with identical content & channel
+  const cleanTitle = title?.trim() || "Untitled Draft";
+  const cleanChannel = channel || "Web / Campaign";
+  const recentDuplicate = req.workspace.drafts[0];
+  if (
+    recentDuplicate &&
+    recentDuplicate.originalText === content &&
+    recentDuplicate.title === cleanTitle &&
+    recentDuplicate.channel === cleanChannel &&
+    (Date.now() - new Date(recentDuplicate.createdAt).getTime()) < 4000
+  ) {
+    return res.status(200).json(recentDuplicate);
+  }
+
   const newDraft = {
     id: `draft-${Date.now()}`,
-    title: title?.trim() || "Untitled Draft",
-    channel: channel || "Web / Campaign",
+    title: cleanTitle,
+    channel: cleanChannel,
     creator: creator || "Creator",
     createdAt: new Date().toISOString(),
     status: "submitted",
@@ -1283,10 +1297,10 @@ app.patch("/api/drafts/:id/alt-text", (req, res) => {
   res.json({ draft });
 });
 
-// --- 7. Applying Finding Actions (Accept, Edit, Reject, Undo) ---
+// --- 7. Applying Finding Actions (Accept, Edit, Remove, Reject, Undo) ---
 app.patch("/api/drafts/:id/finding", (req, res) => {
   const { id } = req.params;
-  const { findingId, action, customFix } = req.body; // action: 'accept' | 'edit' | 'reject' | 'undo'
+  const { findingId, action, customFix } = req.body; // action: 'accept' | 'edit' | 'remove' | 'reject' | 'undo'
 
   const draft = req.workspace.drafts.find(d => d.id === id);
   if (!draft) return res.status(404).json({ error: "Draft not found." });
@@ -1295,6 +1309,20 @@ app.patch("/api/drafts/:id/finding", (req, res) => {
   if (!finding) return res.status(404).json({ error: "Finding not found." });
 
   const prevStatus = finding.status || "pending";
+
+  // Prevent repeat/double action: return current state if already applied
+  if (action === "accept" && finding.status === "accepted" && finding.action !== "remove") {
+    return res.json({ draft, finding });
+  }
+  if (action === "remove" && finding.status === "accepted" && finding.action === "remove") {
+    return res.json({ draft, finding });
+  }
+  if (action === "reject" && finding.status === "rejected") {
+    return res.json({ draft, finding });
+  }
+  if (action === "undo" && (!finding.status || finding.status === "pending")) {
+    return res.json({ draft, finding });
+  }
 
   // If draft was already approved, editing increments version and requires new approval
   if (draft.status === "approved") {
@@ -1327,9 +1355,26 @@ app.patch("/api/drafts/:id/finding", (req, res) => {
             : `Accepted suggested fix for ${finding.rule_id}: replaced "${finding.quote}" with "${finding.suggested_fix}"`)
         : `Accepted design note for ${finding.rule_id}: "${finding.suggested_fix}"`
     });
+  } else if (action === "remove") {
+    finding.status = "accepted";
+    finding.action = "remove";
+    finding.suggested_fix = "";
+    draft.currentText = recomputeDraftText(draft.originalText, draft.findings);
+    const isCopy = isCopyRule(finding.rule_id);
+    draft.history.push({
+      id: `h-${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      actor: "Creator",
+      action: isCopy
+        ? `Accepted removal of "${finding.quote}" [${finding.rule_id}]`
+        : `Accepted design note removal for ${finding.rule_id}`
+    });
   } else if (action === "edit") {
+    if (customFix === undefined || customFix === null || typeof customFix !== "string" || !customFix.trim()) {
+      return res.status(400).json({ error: "Replacement can't be empty. Use 'Remove this phrase' to delete it." });
+    }
     finding.status = "edited";
-    finding.suggested_fix = (customFix || finding.suggested_fix).trim();
+    finding.suggested_fix = customFix.trim();
     draft.currentText = recomputeDraftText(draft.originalText, draft.findings);
     const isCopy = isCopyRule(finding.rule_id);
     draft.history.push({
@@ -1359,7 +1404,7 @@ app.patch("/api/drafts/:id/finding", (req, res) => {
       action: `Reverted decision on ${finding.rule_id} ("${finding.quote}") back to pending`
     });
   } else {
-    return res.status(400).json({ error: `Unknown action "${action}". Allowed: accept, edit, reject, undo.` });
+    return res.status(400).json({ error: `Unknown action "${action}". Allowed: accept, edit, remove, reject, undo.` });
   }
 
   req.saveWs();
@@ -1400,6 +1445,11 @@ app.post("/api/drafts/:id/decision", (req, res) => {
   }
 
   if (decision === "approve") {
+    // Idempotency: duplicate approve returns existing approved draft and certificate
+    if (draft.status === "approved" && draft.certificate) {
+      return res.json(draft);
+    }
+
     // Check for pending SEC-01 finding
     const secPending = (draft.findings || []).some(
       f => (f.rule_id === "SEC-01" || f.source === "security") && (f.status === "pending" || !f.status)
@@ -1432,6 +1482,9 @@ app.post("/api/drafts/:id/decision", (req, res) => {
       action: `Approved draft for publication${noteSnippet} (Certificate ID: ${certificate.certificateId})`
     });
   } else if (decision === "request_changes") {
+    if (draft.status === "changes_requested") {
+      return res.json(draft);
+    }
     draft.status = "changes_requested";
     const noteSnippet = comment ? ` with note: "${comment.trim()}"` : "";
     draft.history.push({
@@ -1441,6 +1494,9 @@ app.post("/api/drafts/:id/decision", (req, res) => {
       action: `Requested revisions${noteSnippet}`
     });
   } else if (decision === "submit_for_review") {
+    if (draft.status === "pending_reviewer") {
+      return res.json(draft);
+    }
     draft.status = "pending_reviewer";
     draft.history.push({
       id: `h-${Date.now()}`,
