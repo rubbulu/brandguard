@@ -32,6 +32,17 @@ import {
   callGeminiGuidelineExtraction,
   validateProposalEditText
 } from "./guidelineService.js";
+import {
+  detectUnclearRules,
+  callGeminiClarification,
+  validateClarificationOutput,
+  buildFallbackClarification,
+  validateClarificationEditText,
+  applyClarificationWording,
+  dismissClarificationRequest,
+  recheckDraftsForClarification,
+  seedClarificationDemo
+} from "./clarificationService.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -321,7 +332,8 @@ app.post("/api/guidelines/extract", async (req, res) => {
       stats: {
         kept: keptWithMetadata.length,
         dropped: validated.dropped.length,
-        blocked: blockedLines.length
+        blocked: blockedLines.length,
+        sourceName: effectiveSourceName
       },
       blockedLines,
       dropped: validated.dropped,
@@ -519,6 +531,166 @@ app.delete("/api/guidelines/proposals", (req, res) => {
   req.workspace.lastImport = null;
   req.saveWs();
   res.json({ message: "Proposals review queue cleared.", proposals: [] });
+});
+
+// --- 3a. Self-Healing Guideline Clarification (Round 3, Improvement 2) ---
+app.get("/api/clarifications", async (req, res) => {
+  try {
+    if (!Array.isArray(req.workspace.clarificationRequests)) {
+      req.workspace.clarificationRequests = [];
+    }
+
+    const detectedUnclear = detectUnclearRules(req.workspace);
+
+    for (const item of detectedUnclear) {
+      // Check if an active/pending request already exists for this rule
+      const existing = req.workspace.clarificationRequests.find(
+        r => r.ruleId === item.ruleId && r.status === "pending"
+      );
+
+      if (existing) {
+        // Update stats and examples in place
+        existing.stats = item.stats;
+        existing.examples = item.examples;
+      } else {
+        // Check if there's already a resolved request with the current rule text (no new clarification needed)
+        const resolved = req.workspace.clarificationRequests.find(
+          r => r.ruleId === item.ruleId && r.status === "resolved" && r.appliedWording === item.ruleText
+        );
+        if (resolved) continue;
+
+        // Generate clarifying question and wordings via Gemini (with automatic validation & fallback)
+        let questionObj = null;
+        try {
+          const aiRes = await callGeminiClarification({
+            apiKey: GEMINI_API_KEY,
+            rule: { id: item.ruleId, text: item.ruleText, category: item.ruleCategory },
+            stats: item.stats,
+            examples: item.examples
+          });
+          questionObj = validateClarificationOutput({
+            aiResult: aiRes,
+            currentText: item.ruleText,
+            ruleId: item.ruleId,
+            rules: req.workspace.rules,
+            stats: item.stats
+          });
+        } catch (aiErr) {
+          console.warn(`[Clarification AI Warning]: ${aiErr.message}. Using fallback question.`);
+          questionObj = {
+            valid: false,
+            ...buildFallbackClarification({ ruleId: item.ruleId, stats: item.stats })
+          };
+        }
+
+        const newRequest = {
+          id: `cr-${item.ruleId}-${Date.now()}`,
+          ruleId: item.ruleId,
+          ruleText: item.ruleText,
+          ruleCategory: item.ruleCategory,
+          stats: item.stats,
+          examples: item.examples,
+          question: questionObj.question,
+          suggestedWordings: questionObj.suggestedWordings || [],
+          status: "pending",
+          aiAvailable: Boolean(questionObj.aiAvailable),
+          appliedWording: null,
+          resolvedAt: null,
+          createdAt: new Date().toISOString()
+        };
+
+        req.workspace.clarificationRequests.unshift(newRequest);
+        req.saveWs();
+      }
+    }
+
+    res.json({ requests: req.workspace.clarificationRequests });
+  } catch (err) {
+    res.status(500).json({ error: `Failed to fetch clarifications: ${err.message}` });
+  }
+});
+
+app.post("/api/clarifications/demo", (req, res) => {
+  try {
+    const result = seedClarificationDemo(req.workspace);
+    req.saveWs();
+    res.json({
+      success: true,
+      message: "Clarification demo loaded (5 flags, 3 disputes for R-07, 1 stored draft).",
+      workspace: req.workspace,
+      requests: req.workspace.clarificationRequests,
+      draft: result.draft,
+      request: result.request
+    });
+  } catch (err) {
+    res.status(500).json({ error: `Failed to seed clarification demo: ${err.message}` });
+  }
+});
+
+app.post("/api/clarifications/:id/decide", (req, res) => {
+  try {
+    const { action, wording, ruleId } = req.body;
+    const requestId = req.params.id;
+
+    if (action === "apply" || action === "edit_and_apply") {
+      const result = applyClarificationWording({
+        workspace: req.workspace,
+        requestId,
+        ruleId,
+        newText: wording,
+        changedBy: "Brand Manager"
+      });
+
+      if (!result.success) {
+        return res.status(400).json({ error: result.error });
+      }
+
+      req.saveWs();
+      return res.json({
+        ...result,
+        rules: req.workspace.rules,
+        requests: req.workspace.clarificationRequests
+      });
+    }
+
+    if (action === "dismiss") {
+      const result = dismissClarificationRequest({
+        workspace: req.workspace,
+        requestId,
+        ruleId
+      });
+
+      req.saveWs();
+      return res.json({
+        ...result,
+        requests: req.workspace.clarificationRequests
+      });
+    }
+
+    res.status(400).json({ error: `Unknown decision action "${action}". Allowed: "apply", "edit_and_apply", "dismiss".` });
+  } catch (err) {
+    res.status(500).json({ error: `Failed to decide clarification: ${err.message}` });
+  }
+});
+
+app.post("/api/clarifications/:id/recheck", (req, res) => {
+  try {
+    const requestId = req.params.id;
+    const reqItem = (req.workspace.clarificationRequests || []).find(r => r.id === requestId);
+    const targetRuleId = req.body.ruleId || reqItem?.ruleId || requestId;
+
+    const result = recheckDraftsForClarification({
+      workspace: req.workspace,
+      ruleId: targetRuleId
+    });
+
+    res.json({
+      success: true,
+      ...result
+    });
+  } catch (err) {
+    res.status(500).json({ error: `Failed to run clarification re-check: ${err.message}` });
+  }
 });
 
 // --- 3b. Visual Settings & Brand Palette ---

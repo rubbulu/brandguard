@@ -33,9 +33,11 @@ brandguard/
 └── server/                          # Node.js + Express backend service
     ├── .env                         # Local runtime environment secrets (API keys, ports)
     ├── certificateService.js        # Canonical JSON serialization, SHA-256 hashing, HMAC signing, verify & tamper tests
-    ├── demoData.js                  # Initial brand rules (R-), tone rules (T-), approved facts (F-), and visual settings (V-)
+    ├── clarificationService.js      # Round 3: Self-healing guideline clarification (dispute detection, Gemini/fallback questions, version history, re-check, demo seeder)
+    ├── demoData.js                  # Initial brand rules (R-), tone rules (T-), approved facts (F-), visual settings (V-), tone profiles, brand terms
     ├── geminiService.js             # Google Gemini API integration (model cascading, structured prompts, JSON parsing)
     ├── generateSampleBanners.js     # Script generating synthetic sample test banners using Sharp and SVG
+    ├── guidelineService.js          # Round 3: Guideline document text extraction (.pdf, .docx, .txt, .md), SEC-01 scanning, Gemini proposals, human review queue
     ├── index.js                     # Main Express API server, workspace routing, rate limiting, and static file serving
     ├── package.json                 # Server dependencies (Express, Cors, Dotenv, Sharp)
     ├── securityScanner.js           # Deterministic SEC-01 prompt-injection and adversarial instruction scanner
@@ -76,6 +78,19 @@ All routes reside under `/api` unless otherwise specified. Each request extracts
 | `PATCH` | `/api/drafts/:id/alt-text` | Updates alt-text for a visual banner draft and updates V-03 finding state accordingly. |
 | `PATCH` | `/api/drafts/:id/finding` | Applies a human decision to a finding (`action`: `"accept"`, `"edit"`, `"reject"`, or `"undo"`). Recomputes copy text for copy rules (R-, F-, T-) while preserving design rules (V-01, V-02) as designer notes. If draft was already approved, increments version (v1 $\rightarrow$ v2) and resets certificate. |
 | `POST` | `/api/drafts/:id/decision` | Records reviewer action: `"approve"` (generates signed compliance certificate), `"request_changes"`, `"submit_for_review"`, or `"save_note"`. Logs action and author to draft audit history. |
+| `POST` | `/api/guidelines/extract` | Round 3: Extracts brand rules and facts from uploaded document (.txt, .md, .docx, .pdf) or pasted text. Enforces 2MB and 15,000 char limits, deterministic SEC-01 scan, and Gemini proposals with verbatim source verification. |
+| `GET` | `/api/guidelines/proposals` | Retrieves active guideline proposals and last import stats. |
+| `POST` | `/api/guidelines/proposals/:id/decide` | Decides proposal (`action`: `"approve"`, `"edit_and_approve"`, `"reject"`). Sequential ID assignment, audit logging, and duplicate prevention. |
+| `POST` | `/api/guidelines/proposals/:id/undo` | Undoes proposal approval, removes item from library, and restores proposal to pending. |
+| `DELETE` | `/api/guidelines/proposals` | Clears all proposals from the human review queue. |
+| `GET` | `/api/clarifications` | Round 3: Evaluates rules against dispute threshold ($\ge$ 3 flags, $\ge$ 40% disputes), generates clarifying questions & wordings via Gemini (or fallback), and returns active clarification requests. |
+| `POST` | `/api/clarifications/demo` | Seeds 1-minute clarification demo: 5 flags, 3 disputes for R-07, and 1 stored draft. |
+| `POST` | `/api/clarifications/:id/decide` | Decides clarification (`action`: `"apply"`, `"edit_and_apply"`, `"dismiss"`). Increments rule version, stores `versionHistory`, updates audit trail. Idempotent against double clicks. |
+| `POST` | `/api/clarifications/:id/recheck` | Re-checks stored drafts against clarified rule wording; returns before/after finding counts and resolved/disappeared findings. |
+| `GET` | `/api/tone-settings` | Retrieves channel tone profiles and brand terms. |
+| `PUT` | `/api/tone-settings` | Updates channel tone profiles and brand terms. |
+| `POST` | `/api/tone-settings/reset` | Resets channel tone profiles and brand terms to defaults. |
+| `POST` | `/api/compare-channels` | Evaluates copy across Twitter, Email, Landing Page, and Banner simultaneously. |
 | `GET` | `/api/insights` | Aggregates real governance statistics from stored workspace drafts: total drafts analyzed, findings count, fix acceptance rate, validator drop statistics, top violated rules, and detects unclear guidelines ($\ge$ 3 flags and $\ge$ 40% dispute rate). |
 | `GET` | `/api/verify/:certificateId`, `/verify/:certificateId` | Public verification endpoint. When requested by a browser (`Accept: text/html`), serves the SPA. When called as JSON, recomputes the canonical SHA-256 payload hash and server HMAC-SHA256 signature to verify record integrity. |
 | `GET` | `/api/certificates/:certificateId` | Retrieves raw stored certificate record by certificate ID. |

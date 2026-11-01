@@ -53,6 +53,8 @@ export function getInitialWorkspaceData(workspaceId) {
     brandTerms: [...INITIAL_BRAND_TERMS],
     proposals: [],
     auditTrail: [],
+    clarificationRequests: [],
+    dismissedClarifications: {},
     drafts: [] // Fresh visitor starts with NO drafts, NO comments, empty audit trail
   };
 }
@@ -94,6 +96,12 @@ export function loadWorkspace(workspaceId) {
       }
       if (!Array.isArray(data.auditTrail)) {
         data.auditTrail = [];
+      }
+      if (!Array.isArray(data.clarificationRequests)) {
+        data.clarificationRequests = [];
+      }
+      if (!data.dismissedClarifications || typeof data.dismissedClarifications !== "object") {
+        data.dismissedClarifications = {};
       }
 
       return data;
