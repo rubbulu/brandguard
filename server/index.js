@@ -41,7 +41,11 @@ import {
   applyClarificationWording,
   dismissClarificationRequest,
   recheckDraftsForClarification,
-  seedClarificationDemo
+  seedClarificationDemo,
+  syncClarificationStats,
+  normalizeAiFailureReason,
+  reopenClarificationRequest,
+  retryClarificationAi
 } from "./clarificationService.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -549,9 +553,11 @@ app.get("/api/clarifications", async (req, res) => {
       );
 
       if (existing) {
-        // Update stats and examples in place
-        existing.stats = item.stats;
-        existing.examples = item.examples;
+        // Fix stale counts: update stats and regenerate template question if dispute count changed while pending
+        const changed = syncClarificationStats(existing, item.stats, item.examples);
+        if (changed) {
+          req.saveWs();
+        }
       } else {
         // Check if there's already a resolved request with the current rule text (no new clarification needed)
         const resolved = req.workspace.clarificationRequests.find(
@@ -561,6 +567,7 @@ app.get("/api/clarifications", async (req, res) => {
 
         // Generate clarifying question and wordings via Gemini (with automatic validation & fallback)
         let questionObj = null;
+        let aiReason = null;
         try {
           const aiRes = await callGeminiClarification({
             apiKey: GEMINI_API_KEY,
@@ -575,10 +582,15 @@ app.get("/api/clarifications", async (req, res) => {
             rules: req.workspace.rules,
             stats: item.stats
           });
+          if (!questionObj.valid) {
+            aiReason = questionObj.aiReason || normalizeAiFailureReason(questionObj.error);
+          }
         } catch (aiErr) {
           console.warn(`[Clarification AI Warning]: ${aiErr.message}. Using fallback question.`);
+          aiReason = normalizeAiFailureReason(aiErr);
           questionObj = {
             valid: false,
+            aiReason,
             ...buildFallbackClarification({ ruleId: item.ruleId, stats: item.stats })
           };
         }
@@ -594,6 +606,8 @@ app.get("/api/clarifications", async (req, res) => {
           suggestedWordings: questionObj.suggestedWordings || [],
           status: "pending",
           aiAvailable: Boolean(questionObj.aiAvailable),
+          aiReason: questionObj.aiAvailable ? null : (aiReason || "AI suggestions unavailable"),
+          wordingSource: questionObj.aiAvailable ? "ai" : null,
           appliedWording: null,
           resolvedAt: null,
           createdAt: new Date().toISOString()
@@ -624,6 +638,43 @@ app.post("/api/clarifications/demo", (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: `Failed to seed clarification demo: ${err.message}` });
+  }
+});
+
+app.post("/api/clarifications/:id/retry", async (req, res) => {
+  try {
+    const result = await retryClarificationAi({
+      workspace: req.workspace,
+      requestId: req.params.id,
+      apiKey: GEMINI_API_KEY
+    });
+    req.saveWs();
+    res.json({
+      ...result,
+      requests: req.workspace.clarificationRequests
+    });
+  } catch (err) {
+    res.status(500).json({ error: `Failed to retry AI suggestions: ${err.message}` });
+  }
+});
+
+app.post(["/api/clarifications/:id/reopen", "/api/clarifications/:id/re-open"], (req, res) => {
+  try {
+    const result = reopenClarificationRequest({
+      workspace: req.workspace,
+      requestId: req.params.id,
+      ruleId: req.body.ruleId
+    });
+    if (!result.success) {
+      return res.status(400).json({ error: result.error });
+    }
+    req.saveWs();
+    res.json({
+      ...result,
+      requests: req.workspace.clarificationRequests
+    });
+  } catch (err) {
+    res.status(500).json({ error: `Failed to reopen clarification: ${err.message}` });
   }
 });
 
@@ -667,7 +718,21 @@ app.post("/api/clarifications/:id/decide", (req, res) => {
       });
     }
 
-    res.status(400).json({ error: `Unknown decision action "${action}". Allowed: "apply", "edit_and_apply", "dismiss".` });
+    if (action === "reopen") {
+      const result = reopenClarificationRequest({
+        workspace: req.workspace,
+        requestId,
+        ruleId
+      });
+
+      req.saveWs();
+      return res.json({
+        ...result,
+        requests: req.workspace.clarificationRequests
+      });
+    }
+
+    res.status(400).json({ error: `Unknown decision action "${action}". Allowed: "apply", "edit_and_apply", "dismiss", "reopen".` });
   } catch (err) {
     res.status(500).json({ error: `Failed to decide clarification: ${err.message}` });
   }
@@ -1223,24 +1288,80 @@ export function isCopyRule(ruleId) {
 }
 
 // Helper: Recompute currentText from originalText and active accepted/edited findings
+// Replaces each accepted fix at its own position (using stored start/end offsets when available)
+// instead of the first text.replace match, so repeated phrases change only where accepted.
 // Design fixes (V-01, V-02) stay as design notes and never change text copy.
 // Only copy fixes (R-, F-, T-) change the text.
 export function recomputeDraftText(originalText, findings = []) {
-  let text = originalText || "";
-  for (const f of findings) {
-    if ((f.status === "accepted" || f.status === "edited") && isCopyRule(f.rule_id)) {
-      if (f.action === "remove") {
-        if (text && text.includes(f.quote)) {
-          text = text.replace(f.quote, "").trim();
+  if (!originalText || typeof originalText !== "string") return "";
+  if (!Array.isArray(findings) || findings.length === 0) return originalText;
+
+  // Active findings are accepted or edited copy fixes
+  const activeFindings = findings.filter(
+    f => (f.status === "accepted" || f.status === "edited") && isCopyRule(f.rule_id)
+  );
+  if (activeFindings.length === 0) return originalText;
+
+  // Track assigned start positions to handle multiple occurrences of the same quote
+  const usedOffsets = new Set();
+  const replacements = [];
+
+  for (const f of activeFindings) {
+    if (!f.quote) continue;
+
+    let start = typeof f.startIndex === "number" ? f.startIndex : (typeof f.start === "number" ? f.start : (typeof f.offset === "number" ? f.offset : -1));
+    let end = typeof f.endIndex === "number" ? f.endIndex : (typeof f.end === "number" ? f.end : -1);
+
+    // If offset is missing or invalid, locate position in originalText avoiding already used offsets
+    if (start < 0) {
+      let searchIdx = 0;
+      let foundIdx = -1;
+      while ((foundIdx = originalText.indexOf(f.quote, searchIdx)) !== -1) {
+        if (!usedOffsets.has(foundIdx)) {
+          break;
         }
-      } else if (f.suggested_fix && f.suggested_fix !== "Needs manual edit") {
-        if (text && text.includes(f.quote)) {
-          text = text.replace(f.quote, f.suggested_fix);
-        }
+        searchIdx = foundIdx + 1;
+      }
+      if (foundIdx !== -1) {
+        start = foundIdx;
+        end = foundIdx + f.quote.length;
       }
     }
+
+    if (start >= 0) {
+      if (end <= start) {
+        end = start + f.quote.length;
+      }
+      usedOffsets.add(start);
+
+      let replacementText = "";
+      if (f.action === "remove") {
+        replacementText = "";
+      } else if (f.suggested_fix && f.suggested_fix !== "Needs manual edit") {
+        replacementText = f.suggested_fix;
+      } else {
+        continue;
+      }
+
+      replacements.push({
+        start,
+        end,
+        quote: f.quote,
+        replacementText
+      });
+    }
   }
-  return text;
+
+  // Sort replacements descending by start position (from right to left)
+  // This guarantees earlier character indices remain unchanged!
+  replacements.sort((a, b) => b.start - a.start);
+
+  let result = originalText;
+  for (const rep of replacements) {
+    result = result.slice(0, rep.start) + rep.replacementText + result.slice(rep.end);
+  }
+
+  return result;
 }
 
 // --- 7. Applying Finding Actions (Accept, Edit, Reject, Undo) ---
@@ -1592,7 +1713,8 @@ app.get("*", (req, res, next) => {
 
 export { app };
 
-if (process.env.NODE_ENV !== "test") {
+const isMainModule = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(__filename);
+if (process.env.NODE_ENV !== "test" && isMainModule) {
   app.listen(PORT, () => {
     console.log(`[BrandGuard Server] Running on http://localhost:${PORT}`);
     console.log(`[BrandGuard Server] Gemini API Key configured: ${Boolean(GEMINI_API_KEY)}`);

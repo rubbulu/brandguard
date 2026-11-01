@@ -1,5 +1,8 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import {
   computeRuleDisputeStats,
   getDisputedExamples,
@@ -10,9 +13,18 @@ import {
   applyClarificationWording,
   dismissClarificationRequest,
   recheckDraftsForClarification,
-  seedClarificationDemo
+  seedClarificationDemo,
+  syncClarificationStats,
+  reopenClarificationRequest,
+  retryClarificationAi,
+  normalizeAiFailureReason
 } from "../clarificationService.js";
 import { INITIAL_RULES, INITIAL_FACTS } from "../demoData.js";
+import { validateFindings } from "../validator.js";
+import { recomputeDraftText } from "../index.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 describe("Self-Healing Guideline Clarification (Round 3, Improvement 2)", () => {
 
@@ -348,6 +360,266 @@ describe("Self-Healing Guideline Clarification (Round 3, Improvement 2)", () => 
     const valid = validateClarificationEditText("Say 'students' for college programs; 'kids' is permitted for under-18 youth camps.");
     assert.equal(valid.valid, true);
     assert.equal(valid.text, "Say 'students' for college programs; 'kids' is permitted for under-18 youth camps.");
+  });
+
+  // Test 9: Stale Count Regeneration
+  test("stale count regeneration: updates template question and drops cached AI wordings when dispute counts change", () => {
+    const request = {
+      id: "cr-R-07",
+      ruleId: "R-07",
+      status: "pending",
+      question: "Old AI question: Should university students be distinguished from youth?",
+      suggestedWordings: ["Wording 1", "Wording 2"],
+      aiAvailable: true,
+      wordingSource: "ai",
+      stats: { totalFlagged: 3, disputedCount: 2, decidedCount: 3 }
+    };
+
+    const newStats = { totalFlagged: 5, disputedCount: 4, decidedCount: 5, disputePercentage: 80 };
+    const examples = [{ quote: "kids in class", status: "rejected" }];
+
+    const changed = syncClarificationStats(request, newStats, examples);
+    assert.equal(changed, true, "Must detect count change and update request");
+    assert.equal(request.stats.disputedCount, 4);
+    assert.equal(request.stats.decidedCount, 5);
+    assert.equal(request.question, "Rule R-07 was disputed 4 of 5 times. Which of these examples should be allowed?");
+    assert.deepEqual(request.suggestedWordings, [], "Must drop cached AI wordings when counts change");
+    assert.equal(request.aiAvailable, false);
+    assert.equal(request.wordingSource, null);
+  });
+
+  // Test 10: Retry AI Suggestions (Failure and Success paths)
+  test("retry AI suggestions: stores plain failure reason on error; replaces template on valid result", async () => {
+    const workspace = {
+      rules: [{ id: "R-07", text: "Say 'students', not 'kids'.", category: "terminology" }],
+      drafts: [
+        {
+          id: "d1",
+          findings: [
+            { rule_id: "R-07", quote: "quote 1", status: "rejected" },
+            { rule_id: "R-07", quote: "quote 2", status: "edited" },
+            { rule_id: "R-07", quote: "quote 3", status: "rejected" }
+          ]
+        }
+      ],
+      clarificationRequests: [
+        {
+          id: "cr-R-07",
+          ruleId: "R-07",
+          status: "pending",
+          question: "Rule R-07 was disputed 3 of 3 times. Which of these examples should be allowed?",
+          suggestedWordings: [],
+          aiAvailable: false
+        }
+      ]
+    };
+
+    // Case A: Retry without API key
+    const failResult = await retryClarificationAi({
+      workspace,
+      requestId: "cr-R-07",
+      apiKey: null
+    });
+    assert.equal(failResult.success, false);
+    assert.ok(workspace.clarificationRequests[0].aiReason);
+    assert.equal(workspace.clarificationRequests[0].aiAvailable, false);
+    assert.ok(typeof workspace.clarificationRequests[0].aiReason === "string");
+
+    // Case B: Validation failure reason normalization
+    const normalizedTimedOut = normalizeAiFailureReason("The request timed out after 10000ms");
+    assert.equal(normalizedTimedOut, "Gemini timed out");
+
+    const normalizedRateLimit = normalizeAiFailureReason("Quota exceeded (429 Too Many Requests)");
+    assert.equal(normalizedRateLimit, "Gemini quota/rate limit");
+
+    const normalizedValidation = normalizeAiFailureReason("AI output is not a valid object.");
+    assert.equal(normalizedValidation, "Gemini output failed validation: AI output is not a valid object.");
+  });
+
+  // Test 11: Demo Labels ("Demo wording" and "Demo data")
+  test("demo labels: seeded demo wordings marked as 'demo' and drafts marked with isDemo: true", () => {
+    const workspace = {
+      rules: [{ id: "R-07", text: "Say 'students', not 'kids'.", category: "terminology" }],
+      drafts: []
+    };
+
+    const res = seedClarificationDemo(workspace);
+    assert.equal(res.success, true);
+
+    const cr = workspace.clarificationRequests.find(r => r.ruleId === "R-07");
+    assert.ok(cr);
+    assert.equal(cr.isDemo, true);
+    assert.equal(cr.wordingSource, "demo");
+    assert.equal(cr.aiAvailable, false);
+    assert.ok(cr.suggestedWordings.length >= 2);
+
+    const demoDraft = workspace.drafts.find(d => d.id === "draft-demo-clarification-1");
+    assert.ok(demoDraft);
+    assert.equal(demoDraft.isDemo, true);
+    assert.ok(demoDraft.findings.every(f => f.isDemo === true));
+
+    assert.ok(cr.examples.every(ex => ex.isDemo === true));
+  });
+
+  // Test 12: Dismiss and Reopen Clarification Request
+  test("dismiss and reopen: dismissed request can be reopened, restoring status and clearing dismissal count", () => {
+    const workspace = {
+      rules: [{ id: "R-07", text: "Say 'students', not 'kids'.", category: "terminology" }],
+      drafts: [
+        {
+          id: "d1",
+          findings: [
+            { rule_id: "R-07", quote: "quote 1", status: "rejected" },
+            { rule_id: "R-07", quote: "quote 2", status: "edited" },
+            { rule_id: "R-07", quote: "quote 3", status: "rejected" }
+          ]
+        }
+      ],
+      clarificationRequests: [
+        {
+          id: "cr-R-07",
+          ruleId: "R-07",
+          status: "pending",
+          stats: { totalFlagged: 3, disputedCount: 3, decidedCount: 3 }
+        }
+      ],
+      dismissedClarifications: {},
+      auditTrail: []
+    };
+
+    // 1. Dismiss
+    const dismissRes = dismissClarificationRequest({
+      workspace,
+      requestId: "cr-R-07",
+      ruleId: "R-07"
+    });
+    assert.equal(dismissRes.success, true);
+    assert.equal(workspace.clarificationRequests[0].status, "dismissed");
+    assert.equal(workspace.dismissedClarifications["R-07"], 3);
+
+    // 2. Reopen
+    const reopenRes = reopenClarificationRequest({
+      workspace,
+      requestId: "cr-R-07",
+      ruleId: "R-07"
+    });
+    assert.equal(reopenRes.success, true);
+    assert.equal(workspace.clarificationRequests[0].status, "pending");
+    assert.equal(workspace.dismissedClarifications["R-07"], undefined);
+    assert.ok(workspace.auditTrail.some(a => a.action.includes("Reopened clarification request for rule R-07")));
+  });
+
+  // Test 13: Position-aware replacement in recomputeDraftText
+  test("position-aware recomputeDraftText: replaces quotes at exact character offsets without corrupting repeated phrases", () => {
+    const originalText = "CampusPro is great for kids and other kids.";
+    // Offset of first 'kids': index 23..27
+    // Offset of second 'kids': index 38..42
+
+    const finding1 = {
+      id: "f1",
+      rule_id: "R-07",
+      quote: "kids",
+      start: 23,
+      end: 27,
+      suggested_fix: "students",
+      status: "rejected" // Creator rejected this one!
+    };
+
+    const finding2 = {
+      id: "f2",
+      rule_id: "R-07",
+      quote: "kids",
+      start: 38,
+      end: 42,
+      suggested_fix: "students",
+      status: "accepted" // Creator accepted this one!
+    };
+
+    const result = recomputeDraftText(originalText, [finding1, finding2]);
+    assert.equal(
+      result,
+      "CampusPro is great for kids and other students.",
+      "Only the accepted second occurrence of 'kids' must change; first occurrence must stay untouched!"
+    );
+
+    // Both accepted with different fixes
+    const finding1Accepted = { ...finding1, status: "accepted", suggested_fix: "teens" };
+    const resultBoth = recomputeDraftText(originalText, [finding1Accepted, finding2]);
+    assert.equal(
+      resultBoth,
+      "CampusPro is great for teens and other students.",
+      "Both occurrences replaced at their respective offsets"
+    );
+  });
+
+  // Test 14: No hard-coded F-01 string in server/validator.js source code
+  test("no hard-coded F-01 literal string override in server/validator.js", () => {
+    const validatorSourcePath = path.join(__dirname, "../validator.js");
+    const sourceCode = fs.readFileSync(validatorSourcePath, "utf-8");
+
+    assert.equal(
+      sourceCode.includes("Battery lasts up to 12 hours."),
+      false,
+      "server/validator.js must NOT contain the hard-coded string 'Battery lasts up to 12 hours.'"
+    );
+    assert.equal(
+      sourceCode.includes("Battery lasts up to 12 hours"),
+      false,
+      "server/validator.js must NOT contain any variant of 'Battery lasts up to 12 hours'"
+    );
+  });
+
+  // Test 15: Fact F-01 fix derived dynamically from library
+  test("fact F-01 fix derived dynamically from library fact text in validateFindings", () => {
+    const draftText = "Meet CampusPro! Its battery lasts 3 days.";
+    const rawFindings = [
+      {
+        rule_id: "F-01",
+        quote: "Its battery lasts 3 days.",
+        suggested_fix: "Its battery is reliable for 12 hours.", // contains 'reliable'
+        explanation: "Contradicts verified lab test"
+      }
+    ];
+
+    // Case A: Default INITIAL_FACTS F-01 ("CampusPro battery lasts up to 12 hours (lab tested).")
+    const validatedA = validateFindings(
+      draftText,
+      rawFindings,
+      INITIAL_RULES,
+      INITIAL_FACTS,
+      ["CampusPro"],
+      "Social Media / Twitter"
+    );
+
+    assert.equal(validatedA.accepted.length, 1);
+    assert.equal(validatedA.accepted[0].rule_id, "F-01");
+    assert.equal(validatedA.accepted[0].suggested_fix, "Battery lasts up to 12 hours.");
+    assert.equal(validatedA.accepted[0].start, 16);
+    assert.equal(validatedA.accepted[0].end, 41);
+
+    // Case B: Dynamic fact in library with completely different hours
+    const customFacts = [
+      {
+        id: "F-01",
+        text: "CampusPro battery lasts up to 20 hours (standard video playback)."
+      }
+    ];
+
+    const validatedB = validateFindings(
+      draftText,
+      rawFindings,
+      INITIAL_RULES,
+      customFacts,
+      ["CampusPro"],
+      "Social Media / Twitter"
+    );
+
+    assert.equal(validatedB.accepted.length, 1);
+    assert.equal(
+      validatedB.accepted[0].suggested_fix,
+      "Battery lasts up to 20 hours.",
+      "Fix must be derived dynamically from custom fact text in the library!"
+    );
   });
 
 });

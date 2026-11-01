@@ -135,6 +135,57 @@ export function detectUnclearRules(workspace) {
 }
 
 /**
+ * Normalizes an AI failure reason into plain, concise human-readable words.
+ */
+export function normalizeAiFailureReason(errOrReason) {
+  if (!errOrReason) return "AI suggestions unavailable";
+  let msg = typeof errOrReason === "string" ? errOrReason : errOrReason.message || "";
+  msg = msg.trim();
+  if (msg.toLowerCase().includes("timed out") || msg.toLowerCase().includes("timeout") || msg.toLowerCase().includes("abort")) {
+    return "Gemini timed out";
+  }
+  if (msg.includes("429") || msg.toLowerCase().includes("quota") || msg.toLowerCase().includes("rate limit") || msg.toLowerCase().includes("resource_exhausted")) {
+    return "Gemini quota/rate limit";
+  }
+  if (msg.includes("GEMINI_API_KEY")) {
+    return "GEMINI_API_KEY is not configured";
+  }
+  if (msg.startsWith("Gemini output failed validation:") || msg.startsWith("Gemini output failed validation")) {
+    return msg;
+  }
+  return `Gemini output failed validation: ${msg}`;
+}
+
+/**
+ * Synchronizes pending clarification request stats.
+ * Regenerates the template question and drops cached AI suggestions whenever dispute count changes.
+ */
+export function syncClarificationStats(request, stats, examples = []) {
+  if (!request || !stats) return false;
+  const countChanged =
+    !request.stats ||
+    request.stats.disputedCount !== stats.disputedCount ||
+    request.stats.totalFlagged !== stats.totalFlagged ||
+    request.stats.decidedCount !== stats.decidedCount;
+
+  request.stats = { ...stats };
+  if (Array.isArray(examples)) {
+    request.examples = examples;
+  }
+
+  if (request.status === "pending" && countChanged) {
+    // Regenerate template question with current numbers and drop cached AI wordings
+    request.question = `Rule ${request.ruleId} was disputed ${stats.disputedCount} of ${stats.decidedCount} times. Which of these examples should be allowed?`;
+    request.suggestedWordings = [];
+    request.aiAvailable = false;
+    request.aiReason = null;
+    request.wordingSource = null;
+    return true;
+  }
+  return false;
+}
+
+/**
  * Builds the fallback clarification object when AI is unavailable or invalid.
  */
 export function buildFallbackClarification({ ruleId, stats }) {
@@ -158,27 +209,33 @@ export function validateClarificationOutput({ aiResult, currentText, ruleId, rul
   if (Array.isArray(rules) && rules.length > 0) {
     const exists = rules.some(r => r.id === ruleId);
     if (!exists) {
+      const err = `Rule ID ${ruleId} does not exist in library.`;
       return {
         valid: false,
-        error: `Rule ID ${ruleId} does not exist in library.`,
+        error: err,
+        aiReason: normalizeAiFailureReason(err),
         ...buildFallbackClarification({ ruleId, stats })
       };
     }
   }
 
   if (!aiResult || typeof aiResult !== "object") {
+    const err = "AI output is not a valid object.";
     return {
       valid: false,
-      error: "AI output is not a valid object.",
+      error: err,
+      aiReason: normalizeAiFailureReason(err),
       ...buildFallbackClarification({ ruleId, stats })
     };
   }
 
   const question = typeof aiResult.question === "string" ? aiResult.question.trim() : "";
   if (!question) {
+    const err = "AI did not provide a non-empty clarifying question.";
     return {
       valid: false,
-      error: "AI did not provide a non-empty clarifying question.",
+      error: err,
+      aiReason: normalizeAiFailureReason(err),
       ...buildFallbackClarification({ ruleId, stats })
     };
   }
@@ -214,9 +271,11 @@ export function validateClarificationOutput({ aiResult, currentText, ruleId, rul
 
   // Must have 2-3 valid wordings
   if (validWordings.length < 2) {
+    const err = `AI returned ${validWordings.length} valid wordings; expected 2 to 3.`;
     return {
       valid: false,
-      error: `AI returned ${validWordings.length} valid wordings; expected 2 to 3.`,
+      error: err,
+      aiReason: normalizeAiFailureReason(err),
       ...buildFallbackClarification({ ruleId, stats })
     };
   }
@@ -225,7 +284,9 @@ export function validateClarificationOutput({ aiResult, currentText, ruleId, rul
     valid: true,
     question,
     suggestedWordings: validWordings.slice(0, 3),
-    aiAvailable: true
+    aiAvailable: true,
+    aiReason: null,
+    wordingSource: "ai"
   };
 }
 
@@ -516,6 +577,110 @@ export function dismissClarificationRequest({ workspace, requestId, ruleId }) {
 }
 
 /**
+ * Reopens a dismissed clarification request:
+ * - Restores status to "pending"
+ * - Clears dismissedAt and dismissedDisputeCount
+ * - Synchronizes current stats & examples
+ * - Logs audit trail entry
+ */
+export function reopenClarificationRequest({ workspace, requestId, ruleId }) {
+  if (!workspace) throw new Error("Workspace is required.");
+
+  const request = (workspace.clarificationRequests || []).find(r => r.id === requestId || r.ruleId === ruleId);
+  const targetRuleId = ruleId || request?.ruleId;
+
+  if (!request) {
+    return { success: false, error: `Clarification request ${requestId || ruleId} not found.` };
+  }
+
+  request.status = "pending";
+  request.dismissedAt = null;
+  request.dismissedDisputeCount = null;
+
+  if (workspace.dismissedClarifications && targetRuleId) {
+    delete workspace.dismissedClarifications[targetRuleId];
+  }
+
+  // Update stats to current numbers
+  const currentStats = computeRuleDisputeStats(targetRuleId, workspace.drafts || []);
+  const currentExamples = getDisputedExamples(targetRuleId, workspace.drafts || [], 5);
+  syncClarificationStats(request, currentStats, currentExamples);
+
+  if (!Array.isArray(workspace.auditTrail)) {
+    workspace.auditTrail = [];
+  }
+  workspace.auditTrail.push({
+    id: `audit-${Date.now()}`,
+    timestamp: new Date().toISOString(),
+    actor: "Brand Manager",
+    action: `Reopened clarification request for rule ${targetRuleId}`,
+    ruleId: targetRuleId
+  });
+
+  return { success: true, request };
+}
+
+/**
+ * Retries generating AI suggestions for a clarification request:
+ * - Calls Gemini and validates output
+ * - Replaces template only if the output passes validation
+ * - Stores plain failure reason if it fails
+ */
+export async function retryClarificationAi({ workspace, requestId, apiKey }) {
+  if (!workspace) throw new Error("Workspace is required.");
+  const request = (workspace.clarificationRequests || []).find(r => r.id === requestId);
+  if (!request) {
+    return { success: false, error: `Clarification request ${requestId} not found.` };
+  }
+
+  const rule = (workspace.rules || []).find(r => r.id === request.ruleId);
+  if (!rule) {
+    return { success: false, error: `Rule ${request.ruleId} not found in library.` };
+  }
+
+  const currentStats = computeRuleDisputeStats(request.ruleId, workspace.drafts || []);
+  const currentExamples = getDisputedExamples(request.ruleId, workspace.drafts || [], 5);
+  request.stats = { ...currentStats };
+  request.examples = currentExamples;
+
+  try {
+    const aiResult = await callGeminiClarification({
+      apiKey,
+      rule: { id: request.ruleId, text: rule.text, category: rule.category },
+      stats: currentStats,
+      examples: currentExamples
+    });
+
+    const validated = validateClarificationOutput({
+      aiResult,
+      currentText: rule.text,
+      ruleId: request.ruleId,
+      rules: workspace.rules,
+      stats: currentStats
+    });
+
+    if (validated.valid) {
+      request.question = validated.question;
+      request.suggestedWordings = validated.suggestedWordings;
+      request.aiAvailable = true;
+      request.aiReason = null;
+      request.wordingSource = "ai";
+      return { success: true, request, message: "AI suggestions generated successfully." };
+    } else {
+      const reason = normalizeAiFailureReason(validated.error);
+      request.aiReason = reason;
+      request.aiAvailable = false;
+      return { success: false, request, error: reason };
+    }
+  } catch (err) {
+    const reason = normalizeAiFailureReason(err);
+    request.aiReason = reason;
+    request.aiAvailable = false;
+    return { success: false, request, error: reason };
+  }
+}
+
+/**
  * Re-checks stored drafts against clarified rule wording:
  * Shows finding counts before and after, and which findings disappeared.
  * If no stored draft exists, says so plainly.
@@ -634,6 +799,7 @@ export function seedClarificationDemo(workspace) {
   // Create 1 stored draft with 5 flags for R-07 (3 disputes: 2 rejected, 1 edited, and 2 accepted)
   const demoDraft = {
     id: "draft-demo-clarification-1",
+    isDemo: true,
     title: "Youth Tech Summer Camp Promo (Twitter)",
     channel: "Social Media / Twitter",
     originalText: "Join CampusPro for our annual Summer Coding Camp for kids and teens! High school and middle school kids learn Python and robotics. Meet college students as mentors.",
@@ -670,6 +836,7 @@ export function seedClarificationDemo(workspace) {
       {
         id: "f-demo-1",
         rule_id: "R-07",
+        isDemo: true,
         quote: "Summer Coding Camp for kids and teens",
         suggested_fix: "Summer Coding Camp for students and teens",
         status: "rejected",
@@ -679,6 +846,7 @@ export function seedClarificationDemo(workspace) {
       {
         id: "f-demo-2",
         rule_id: "R-07",
+        isDemo: true,
         quote: "middle school kids",
         suggested_fix: "middle school youth",
         status: "edited",
@@ -688,6 +856,7 @@ export function seedClarificationDemo(workspace) {
       {
         id: "f-demo-3",
         rule_id: "R-07",
+        isDemo: true,
         quote: "kids learn Python",
         suggested_fix: "students learn Python",
         status: "rejected",
@@ -697,6 +866,7 @@ export function seedClarificationDemo(workspace) {
       {
         id: "f-demo-4",
         rule_id: "R-07",
+        isDemo: true,
         quote: "college kids",
         suggested_fix: "college students",
         status: "accepted",
@@ -706,6 +876,7 @@ export function seedClarificationDemo(workspace) {
       {
         id: "f-demo-5",
         rule_id: "R-07",
+        isDemo: true,
         quote: "kids on campus",
         suggested_fix: "students on campus",
         status: "accepted",
@@ -724,7 +895,7 @@ export function seedClarificationDemo(workspace) {
 
   // Pre-seed or refresh the clarification request for R-07
   const stats = computeRuleDisputeStats("R-07", workspace.drafts);
-  const examples = getDisputedExamples("R-07", workspace.drafts, 5);
+  const examples = getDisputedExamples("R-07", workspace.drafts, 5).map(ex => ({ ...ex, isDemo: true }));
 
   const demoRequest = {
     id: `cr-R-07-demo`,
@@ -740,7 +911,10 @@ export function seedClarificationDemo(workspace) {
       "Refer to university attendees as 'students'; the term 'kids' may be used only for minors in elementary and middle school programs."
     ],
     status: "pending",
-    aiAvailable: true,
+    aiAvailable: false,
+    wordingSource: "demo",
+    isDemo: true,
+    aiReason: null,
     appliedWording: null,
     resolvedAt: null,
     createdAt: new Date().toISOString()
@@ -757,6 +931,7 @@ export function seedClarificationDemo(workspace) {
   ];
 
   return {
+    success: true,
     draft: demoDraft,
     request: demoRequest
   };

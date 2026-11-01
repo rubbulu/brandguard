@@ -159,6 +159,9 @@ export default function App() {
   const [editingClarificationError, setEditingClarificationError] = useState(null);
   const [recheckResults, setRecheckResults] = useState({});
   const [isRecheckingId, setIsRecheckingId] = useState(null);
+  const [showDismissedClarifications, setShowDismissedClarifications] = useState(false);
+  const [retryingClarificationId, setRetryingClarificationId] = useState(null);
+  const [reopeningClarificationId, setReopeningClarificationId] = useState(null);
 
   // Compare Channels State (Content Creator)
   const [showCompareModal, setShowCompareModal] = useState(false);
@@ -338,7 +341,8 @@ export default function App() {
         setAllDrafts(dList);
         if (dList.length > 0) {
           setActiveDraft((prev) => {
-            const nextDraft = prev ? dList.find((d) => d.id === prev.id) || dList[0] : dList[0];
+            if (!prev) return null; // Never show a stored or demo draft as if it was just submitted: keep in Recent drafts list
+            const nextDraft = dList.find((d) => d.id === prev.id) || null;
             if (nextDraft && nextDraft.isVisual) {
               setCreatorMode("visual");
             }
@@ -771,6 +775,9 @@ export default function App() {
         setEditingClarificationError(null);
         setRecheckResults({});
         setIsRecheckingId(null);
+        setShowDismissedClarifications(false);
+        setRetryingClarificationId(null);
+        setReopeningClarificationId(null);
         await loadWorkspaceData();
         showNotice("Workspace reset to clean initial state.");
       }
@@ -1485,6 +1492,52 @@ export default function App() {
       showNotice(`Re-check error: ${err.message}`);
     } finally {
       setIsRecheckingId(null);
+    }
+  };
+
+  const handleRetryClarification = async (requestId) => {
+    if (retryingClarificationId) return;
+    setRetryingClarificationId(requestId);
+    try {
+      const res = await wsFetch(`/api/clarifications/${requestId}/retry`, { method: "POST" });
+      const data = await res.json();
+      if (res.ok) {
+        if (data.success) {
+          showNotice(data.message || "AI suggestions generated successfully.");
+        } else {
+          showNotice(`Retry failed: ${data.error || "Could not generate AI suggestions"}`);
+        }
+        await loadWorkspaceData();
+      } else {
+        showNotice(data.error || "Failed to retry AI suggestions.");
+      }
+    } catch (err) {
+      showNotice(`Retry error: ${err.message}`);
+    } finally {
+      setRetryingClarificationId(null);
+    }
+  };
+
+  const handleReopenClarification = async (requestId, ruleId) => {
+    if (reopeningClarificationId) return;
+    setReopeningClarificationId(requestId);
+    try {
+      const res = await wsFetch(`/api/clarifications/${requestId}/reopen`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ruleId })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        showNotice(`Clarification request for ${ruleId || "rule"} reopened.`);
+        await loadWorkspaceData();
+      } else {
+        showNotice(data.error || "Failed to reopen clarification.");
+      }
+    } catch (err) {
+      showNotice(`Reopen error: ${err.message}`);
+    } finally {
+      setReopeningClarificationId(null);
     }
   };
 
@@ -2832,201 +2885,140 @@ export default function App() {
             </div>
 
             {/* SELF-HEALING GUIDELINE CLARIFICATION (ROUND 3, IMPROVEMENT 2) */}
-            <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
-              <div className="p-4 sm:p-5 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <HelpCircle className="w-5 h-5 text-purple-600" />
-                    <h2 className="font-bold text-slate-900 text-base">Clarification Requests</h2>
-                    {clarificationRequests.filter(r => r.status === "pending").length > 0 && (
-                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 animate-pulse">
-                        {clarificationRequests.filter(r => r.status === "pending").length} Needs Attention
-                      </span>
-                    )}
-                  </div>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    Self-healing policy clarification triggered when creators frequently dispute a rule (&ge; 3 flags, &ge; 40% disputes). AI suggests clearer wordings; you decide what enters the library.
-                  </p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={handleLoadClarificationDemo}
-                    disabled={isLoadingClarificationDemo}
-                    className="px-3 py-1.5 rounded-xl bg-purple-50 border border-purple-200 hover:bg-purple-100 text-purple-700 text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs disabled:opacity-50"
-                    title="Seed dispute history for R-07 (5 flags, 3 disputes) and 1 stored draft to test clarification in < 1 minute"
-                  >
-                    <Sparkles className="w-3.5 h-3.5 text-purple-600" />
-                    {isLoadingClarificationDemo ? "Loading demo..." : "Load clarification demo"}
-                  </button>
-                </div>
-              </div>
+            {(() => {
+              const pendingClarifications = clarificationRequests.filter(r => r.status === "pending");
+              const resolvedClarifications = clarificationRequests.filter(r => r.status === "resolved");
+              const dismissedClarificationsList = clarificationRequests.filter(r => r.status === "dismissed");
+              const activeClarificationsList = [...pendingClarifications, ...resolvedClarifications];
 
-              <div className="p-4 sm:p-5 space-y-4">
-                {clarificationRequests.length === 0 ? (
-                  <div className="p-8 text-center bg-slate-50/50 rounded-xl border border-dashed border-slate-200">
-                    <div className="w-10 h-10 rounded-full bg-purple-50 text-purple-600 flex items-center justify-center mx-auto mb-2.5">
-                      <HelpCircle className="w-5 h-5" />
+              return (
+                <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
+                  <div className="p-4 sm:p-5 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <HelpCircle className="w-5 h-5 text-purple-600" />
+                        <h2 className="font-bold text-slate-900 text-base">Clarification Requests</h2>
+                        {pendingClarifications.length > 0 && (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 animate-pulse">
+                            {pendingClarifications.length} Needs Attention
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        Self-healing policy clarification triggered when creators frequently dispute a rule (&ge; 3 flags, &ge; 40% disputes). AI suggests clearer wordings; you decide what enters the library.
+                      </p>
                     </div>
-                    <h3 className="font-bold text-slate-800 text-sm">
-                      No unclear rules right now. Rules that creators keep disputing will appear here.
-                    </h3>
-                    <p className="text-xs text-slate-500 mt-1 max-w-md mx-auto">
-                      When creators frequently reject or edit AI-suggested fixes for a policy, BrandGuard automatically raises a clarification request with suggested clearer wordings.
-                    </p>
-                    <button
-                      type="button"
-                      onClick={handleLoadClarificationDemo}
-                      disabled={isLoadingClarificationDemo}
-                      className="mt-4 inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold transition-all shadow-2xs"
-                    >
-                      <Sparkles className="w-3.5 h-3.5" />
-                      {isLoadingClarificationDemo ? "Loading demo..." : "Load clarification demo"}
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={handleLoadClarificationDemo}
+                        disabled={isLoadingClarificationDemo}
+                        className="px-3 py-1.5 rounded-xl bg-purple-50 border border-purple-200 hover:bg-purple-100 text-purple-700 text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs disabled:opacity-50"
+                        title="Seed dispute history for R-07 (5 flags, 3 disputes) and 1 stored draft to test clarification in < 1 minute"
+                      >
+                        <Sparkles className="w-3.5 h-3.5 text-purple-600" />
+                        {isLoadingClarificationDemo ? "Loading demo..." : "Load clarification demo"}
+                      </button>
+                    </div>
                   </div>
-                ) : (
-                  <div className="space-y-4">
-                    {clarificationRequests.map((request) => {
-                      const isSavingThis = savingClarificationId === request.id;
-                      const isEditingThis = editingClarificationId === request.id;
-                      const recheckData = recheckResults[request.id];
-                      const isRecheckingThis = isRecheckingId === request.id;
 
-                      return (
-                        <div
-                          key={request.id}
-                          className={`p-4 sm:p-5 rounded-xl border transition-all space-y-3 ${
-                            request.status === "resolved"
-                              ? "bg-emerald-50/20 border-emerald-200"
-                              : request.status === "dismissed"
-                              ? "bg-slate-50/60 border-slate-200 opacity-80"
-                              : "bg-white border-slate-200 shadow-2xs hover:border-purple-200"
-                          }`}
+                  <div className="p-4 sm:p-5 space-y-4">
+                    {activeClarificationsList.length === 0 ? (
+                      <div className="p-8 text-center bg-slate-50/50 rounded-xl border border-dashed border-slate-200">
+                        <div className="w-10 h-10 rounded-full bg-purple-50 text-purple-600 flex items-center justify-center mx-auto mb-2.5">
+                          <HelpCircle className="w-5 h-5" />
+                        </div>
+                        <h3 className="font-bold text-slate-800 text-sm">
+                          No unclear rules right now. Rules that creators keep disputing will appear here.
+                        </h3>
+                        <p className="text-xs text-slate-500 mt-1 max-w-md mx-auto">
+                          When creators frequently reject or edit AI-suggested fixes for a policy, BrandGuard automatically raises a clarification request with suggested clearer wordings.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={handleLoadClarificationDemo}
+                          disabled={isLoadingClarificationDemo}
+                          className="mt-4 inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold transition-all shadow-2xs"
                         >
-                          {/* Card Header */}
-                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-2.5">
-                            <div className="flex items-center gap-2">
-                              <span className="font-mono font-bold text-purple-700 text-sm">{request.ruleId}</span>
-                              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-700 capitalize">
-                                {request.ruleCategory || "terminology"}
-                              </span>
-                              {request.status === "resolved" ? (
-                                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 flex items-center gap-1">
-                                  <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                                  Clarified (v{request.newVersion || 2})
-                                </span>
-                              ) : request.status === "dismissed" ? (
-                                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-600">
-                                  Dismissed (Kept as is)
-                                </span>
-                              ) : (
-                                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800">
-                                  Pending Clarification
-                                </span>
-                              )}
-                            </div>
-                            <span className="text-[11px] text-slate-500 font-medium">
-                              Flagged {request.stats?.totalFlagged} times &bull; {request.stats?.disputePercentage}% dispute rate ({request.stats?.disputedCount} of {request.stats?.decidedCount} decisions disputed)
-                            </span>
-                          </div>
+                          <Sparkles className="w-3.5 h-3.5" />
+                          {isLoadingClarificationDemo ? "Loading demo..." : "Load clarification demo"}
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="space-y-4">
+                        {activeClarificationsList.map((request) => {
+                          const isSavingThis = savingClarificationId === request.id;
+                          const isEditingThis = editingClarificationId === request.id;
+                          const recheckData = recheckResults[request.id];
+                          const isRecheckingThis = isRecheckingId === request.id;
+                          const isRetryingThis = retryingClarificationId === request.id;
 
-                          {/* Current Policy Text */}
-                          <div className="p-2.5 bg-slate-50 rounded-lg border border-slate-200 text-xs text-slate-700">
-                            <span className="font-bold text-slate-900">Current Rule Text: </span>
-                            "{request.ruleText}"
-                          </div>
-
-                          {/* Disputed Examples (up to 5) */}
-                          {request.examples && request.examples.length > 0 && (
-                            <div className="space-y-1.5">
-                              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                                Disputed Creator Examples ({request.examples.length}):
-                              </span>
-                              <div className="grid grid-cols-1 gap-2">
-                                {request.examples.map((ex, idx) => (
-                                  <div key={idx} className="p-2.5 bg-amber-50/60 border border-amber-200/80 rounded-lg text-xs space-y-1">
-                                    <div className="flex items-center justify-between gap-2">
-                                      <span className="font-bold text-slate-900 font-mono">"{ex.quote}"</span>
-                                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                                        ex.status === "rejected" ? "bg-red-100 text-red-800" : "bg-purple-100 text-purple-800"
-                                      }`}>
-                                        Creator {ex.creatorDecision || ex.status}
-                                      </span>
-                                    </div>
-                                    <div className="text-[11px] text-slate-600">
-                                      <span className="text-slate-500">Suggested fix: </span>"{ex.suggestedFix}"
-                                      {ex.explanation && <span className="text-slate-500 italic ml-2">({ex.explanation})</span>}
-                                    </div>
-                                    <div className="text-[10px] text-slate-400">Context: {ex.draftTitle}</div>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-
-                          {/* Clarifying Question Callout */}
-                          <div className="p-3 bg-purple-50/70 border border-purple-200 rounded-xl space-y-1">
-                            <div className="flex items-center gap-1.5 text-xs font-bold text-purple-900">
-                              <HelpCircle className="w-4 h-4 text-purple-600" />
-                              <span>Clarifying Question for Brand Manager</span>
-                              {!request.aiAvailable && (
-                                <span className="text-[10px] font-normal text-purple-600 italic ml-1">
-                                  (AI suggestions unavailable; template question shown)
-                                </span>
-                              )}
-                            </div>
-                            <p className="text-xs text-purple-950 font-medium leading-relaxed">
-                              {request.question}
-                            </p>
-                          </div>
-
-                          {/* Pending State: Suggested Wordings & Actions */}
-                          {request.status === "pending" && (
-                            <div className="space-y-3 pt-1">
-                              {request.suggestedWordings && request.suggestedWordings.length > 0 && (
-                                <div className="space-y-2">
-                                  <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                                    AI Suggested Clearer Wordings ({request.suggestedWordings.length}):
+                          return (
+                            <div
+                              key={request.id}
+                              className={`p-4 sm:p-5 rounded-xl border transition-all space-y-3 ${
+                                request.status === "resolved"
+                                  ? "bg-emerald-50/20 border-emerald-200"
+                                  : "bg-white border-slate-200 shadow-2xs hover:border-purple-200"
+                              }`}
+                            >
+                              {/* Card Header */}
+                              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-2.5">
+                                <div className="flex items-center gap-2">
+                                  <span className="font-mono font-bold text-purple-700 text-sm">{request.ruleId}</span>
+                                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-700 capitalize">
+                                    {request.ruleCategory || "terminology"}
                                   </span>
-                                  <div className="space-y-2">
-                                    {request.suggestedWordings.map((wording, wIdx) => (
-                                      <div
-                                        key={wIdx}
-                                        className="p-3 bg-white border border-slate-200 hover:border-purple-300 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs transition-colors shadow-2xs"
-                                      >
-                                        <span className="text-slate-800 font-medium flex-1">"{wording}"</span>
-                                        <div className="flex items-center gap-2 shrink-0">
-                                          <button
-                                            type="button"
-                                            disabled={isSavingThis}
-                                            onClick={() => handleClarificationDecide(request.id, "apply", wording, request.ruleId)}
-                                            className="px-2.5 py-1.5 rounded-lg bg-green-600 hover:bg-green-700 text-white font-bold text-xs flex items-center gap-1 transition-all disabled:opacity-50"
-                                          >
-                                            {isSavingThis ? (
-                                              <>
-                                                <RefreshCw className="w-3 h-3 animate-spin" />
-                                                Saving...
-                                              </>
-                                            ) : (
-                                              <>
-                                                <Check className="w-3 h-3" />
-                                                Use this wording
-                                              </>
-                                            )}
-                                          </button>
-                                          <button
-                                            type="button"
-                                            disabled={isSavingThis}
-                                            onClick={() => {
-                                              setEditingClarificationId(request.id);
-                                              setEditingClarificationText(wording);
-                                              setEditingClarificationError(null);
-                                            }}
-                                            className="px-2.5 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-slate-700 font-bold text-xs flex items-center gap-1 transition-all disabled:opacity-50"
-                                          >
-                                            <Edit3 className="w-3 h-3" />
-                                            Edit & use
-                                          </button>
+                                  {request.status === "resolved" ? (
+                                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 flex items-center gap-1">
+                                      <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                                      Clarified (v{request.newVersion || 2})
+                                    </span>
+                                  ) : (
+                                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800">
+                                      Pending Clarification
+                                    </span>
+                                  )}
+                                </div>
+                                <span className="text-[11px] text-slate-500 font-medium">
+                                  Flagged {request.stats?.totalFlagged} times &bull; {request.stats?.disputePercentage}% dispute rate ({request.stats?.disputedCount} of {request.stats?.decidedCount} decisions disputed)
+                                </span>
+                              </div>
+
+                              {/* Current Policy Text */}
+                              <div className="p-2.5 bg-slate-50 rounded-lg border border-slate-200 text-xs text-slate-700">
+                                <span className="font-bold text-slate-900">Current Rule Text: </span>
+                                "{request.ruleText}"
+                              </div>
+
+                              {/* Disputed Examples (up to 5) */}
+                              {request.examples && request.examples.length > 0 && (
+                                <div className="space-y-1.5">
+                                  <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                                    Disputed Creator Examples ({request.examples.length}):
+                                  </span>
+                                  <div className="grid grid-cols-1 gap-2">
+                                    {request.examples.map((ex, idx) => (
+                                      <div key={idx} className="p-2.5 bg-amber-50/60 border border-amber-200/80 rounded-lg text-xs space-y-1">
+                                        <div className="flex items-center justify-between gap-2">
+                                          <span className="font-bold text-slate-900 font-mono">"{ex.quote}"</span>
+                                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                            ex.status === "rejected" ? "bg-red-100 text-red-800" : "bg-purple-100 text-purple-800"
+                                          }`}>
+                                            Creator {ex.creatorDecision || ex.status}
+                                          </span>
+                                        </div>
+                                        <div className="text-[11px] text-slate-600">
+                                          <span className="text-slate-500">Suggested fix: </span>"{ex.suggestedFix}"
+                                          {ex.explanation && <span className="text-slate-500 italic ml-2">({ex.explanation})</span>}
+                                        </div>
+                                        <div className="text-[10px] text-slate-400 flex items-center gap-1.5">
+                                          <span>Context: {ex.draftTitle}</span>
+                                          {(ex.isDemo || request.isDemo || ex.draftId?.includes("demo")) && (
+                                            <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-purple-100 text-purple-800">
+                                              Demo data
+                                            </span>
+                                          )}
                                         </div>
                                       </div>
                                     ))}
@@ -3034,181 +3026,297 @@ export default function App() {
                                 </div>
                               )}
 
-                              {/* Inline Edit Box */}
-                              {isEditingThis && (
-                                <div className="p-3.5 bg-blue-50/60 border border-blue-200 rounded-xl space-y-2 text-xs">
-                                  <div className="flex items-center justify-between">
-                                    <span className="font-bold text-blue-900">Edit and Apply Clearer Rule Text:</span>
-                                    <span className="text-[11px] text-blue-700">{editingClarificationText.length}/500</span>
-                                  </div>
-                                  <textarea
-                                    value={editingClarificationText}
-                                    onChange={(e) => {
-                                      setEditingClarificationText(e.target.value);
-                                      if (editingClarificationError) setEditingClarificationError(null);
-                                    }}
-                                    rows={3}
-                                    maxLength={500}
-                                    className="w-full p-2.5 bg-white border border-blue-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                    placeholder="Enter clarified policy wording (min 5 characters)..."
-                                  />
-                                  {editingClarificationError && (
-                                    <p className="text-[11px] text-red-600 font-bold flex items-center gap-1">
-                                      <AlertTriangle className="w-3.5 h-3.5 text-red-600" />
-                                      {editingClarificationError}
-                                    </p>
+                              {/* Clarifying Question Callout */}
+                              <div className="p-3 bg-purple-50/70 border border-purple-200 rounded-xl space-y-2">
+                                <div className="flex items-center gap-1.5 text-xs font-bold text-purple-900">
+                                  <HelpCircle className="w-4 h-4 text-purple-600" />
+                                  <span>Clarifying Question for Brand Manager</span>
+                                  {!request.aiAvailable && (
+                                    <span className="text-[10px] font-normal text-purple-600 italic ml-1">
+                                      (Template question shown)
+                                    </span>
                                   )}
-                                  <div className="flex items-center justify-end gap-2 pt-1">
+                                </div>
+                                <p className="text-xs text-purple-950 font-medium leading-relaxed">
+                                  {request.question}
+                                </p>
+                                {!request.aiAvailable && (
+                                  <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-purple-200/60 mt-1">
+                                    <div className="text-[11px] text-amber-800 font-medium flex items-center gap-1.5">
+                                      <Info className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                                      <span>{request.aiReason || "AI suggestions unavailable"}</span>
+                                    </div>
                                     <button
                                       type="button"
-                                      disabled={isSavingThis}
-                                      onClick={() => {
-                                        setEditingClarificationId(null);
-                                        setEditingClarificationError(null);
-                                      }}
-                                      className="px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-600 text-xs font-medium"
+                                      disabled={isRetryingThis}
+                                      onClick={() => handleRetryClarification(request.id)}
+                                      className="px-2.5 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all disabled:opacity-50 shadow-2xs"
                                     >
-                                      Cancel
-                                    </button>
-                                    <button
-                                      type="button"
-                                      disabled={isSavingThis}
-                                      onClick={() => handleClarificationDecide(request.id, "edit_and_apply", editingClarificationText, request.ruleId)}
-                                      className="px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold flex items-center gap-1 disabled:opacity-50"
-                                    >
-                                      {isSavingThis ? (
+                                      {isRetryingThis ? (
                                         <>
                                           <RefreshCw className="w-3 h-3 animate-spin" />
-                                          Saving...
+                                          Retrying AI suggestions...
                                         </>
                                       ) : (
                                         <>
-                                          <Save className="w-3 h-3" />
-                                          Save & Apply Wording
+                                          <Sparkles className="w-3 h-3" />
+                                          Retry AI suggestions
                                         </>
                                       )}
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+
+                              {/* Pending State: Suggested Wordings & Actions */}
+                              {request.status === "pending" && (
+                                <div className="space-y-3 pt-1">
+                                  {request.suggestedWordings && request.suggestedWordings.length > 0 && (
+                                    <div className="space-y-2">
+                                      <div className="flex items-center justify-between">
+                                        <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                                          {request.wordingSource === "demo" || request.isDemo ? "Demo Wordings" : "AI-suggested Wordings"} ({request.suggestedWordings.length}):
+                                        </span>
+                                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                          request.wordingSource === "demo" || request.isDemo
+                                            ? "bg-purple-100 text-purple-800"
+                                            : "bg-blue-100 text-blue-800"
+                                        }`}>
+                                          {request.wordingSource === "demo" || request.isDemo ? "Demo wording" : "AI-suggested"}
+                                        </span>
+                                      </div>
+                                      <div className="space-y-2">
+                                        {request.suggestedWordings.map((wording, wIdx) => (
+                                          <div
+                                            key={wIdx}
+                                            className="p-3 bg-white border border-slate-200 hover:border-purple-300 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs transition-colors shadow-2xs"
+                                          >
+                                            <div className="flex items-center gap-2 flex-1">
+                                              <span className="text-slate-800 font-medium">"{wording}"</span>
+                                              <span className={`px-1.5 py-0.2 rounded text-[9px] font-bold shrink-0 ${
+                                                request.wordingSource === "demo" || request.isDemo
+                                                  ? "bg-purple-50 text-purple-700 border border-purple-200"
+                                                  : "bg-blue-50 text-blue-700 border border-blue-200"
+                                              }`}>
+                                                {request.wordingSource === "demo" || request.isDemo ? "Demo wording" : "AI-suggested"}
+                                              </span>
+                                            </div>
+                                            <div className="flex items-center gap-2 shrink-0">
+                                              <button
+                                                type="button"
+                                                disabled={isSavingThis}
+                                                onClick={() => handleClarificationDecide(request.id, "apply", wording, request.ruleId)}
+                                                className="px-2.5 py-1.5 rounded-lg bg-green-600 hover:bg-green-700 text-white font-bold text-xs flex items-center gap-1 transition-all disabled:opacity-50"
+                                              >
+                                                {isSavingThis ? (
+                                                  <>
+                                                    <RefreshCw className="w-3 h-3 animate-spin" />
+                                                    Saving...
+                                                  </>
+                                                ) : (
+                                                  <>
+                                                    <Check className="w-3 h-3" />
+                                                    Use this wording
+                                                  </>
+                                                )}
+                                              </button>
+                                              <button
+                                                type="button"
+                                                disabled={isSavingThis}
+                                                onClick={() => {
+                                                  setEditingClarificationId(request.id);
+                                                  setEditingClarificationText(wording);
+                                                  setEditingClarificationError(null);
+                                                }}
+                                                className="px-2.5 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-slate-700 font-bold text-xs flex items-center gap-1 transition-all disabled:opacity-50"
+                                              >
+                                                <Edit3 className="w-3 h-3" />
+                                                Edit & use
+                                              </button>
+                                            </div>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  )}
+
+                                  {/* Inline Edit Box */}
+                                  {isEditingThis && (
+                                    <div className="p-3.5 bg-blue-50/60 border border-blue-200 rounded-xl space-y-2 text-xs">
+                                      <div className="flex items-center justify-between">
+                                        <span className="font-bold text-blue-900">Edit and Apply Clearer Rule Text:</span>
+                                        <span className="text-[11px] text-blue-700">{editingClarificationText.length}/500</span>
+                                      </div>
+                                      <textarea
+                                        value={editingClarificationText}
+                                        onChange={(e) => {
+                                          setEditingClarificationText(e.target.value);
+                                          if (editingClarificationError) setEditingClarificationError(null);
+                                        }}
+                                        rows={3}
+                                        maxLength={500}
+                                        className="w-full p-2.5 bg-white border border-blue-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        placeholder="Enter clarified policy wording (min 5 characters)..."
+                                      />
+                                      {editingClarificationError && (
+                                        <p className="text-[11px] text-red-600 font-bold flex items-center gap-1">
+                                          <AlertTriangle className="w-3.5 h-3.5 text-red-600" />
+                                          {editingClarificationError}
+                                        </p>
+                                      )}
+                                      <div className="flex items-center justify-end gap-2 pt-1">
+                                        <button
+                                          type="button"
+                                          disabled={isSavingThis}
+                                          onClick={() => {
+                                            setEditingClarificationId(null);
+                                            setEditingClarificationError(null);
+                                          }}
+                                          className="px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-600 text-xs font-medium"
+                                        >
+                                          Cancel
+                                        </button>
+                                        <button
+                                          type="button"
+                                          disabled={isSavingThis}
+                                          onClick={() => handleClarificationDecide(request.id, "edit_and_apply", editingClarificationText, request.ruleId)}
+                                          className="px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold flex items-center gap-1 disabled:opacity-50"
+                                        >
+                                          {isSavingThis ? (
+                                            <>
+                                              <RefreshCw className="w-3 h-3 animate-spin" />
+                                              Saving...
+                                            </>
+                                          ) : (
+                                            <>
+                                              <Save className="w-3 h-3" />
+                                              Save & Apply Wording
+                                            </>
+                                          )}
+                                        </button>
+                                      </div>
+                                    </div>
+                                  )}
+
+                                  {/* Card Actions: Keep rule as is */}
+                                  <div className="flex items-center justify-between pt-2 border-t border-slate-100">
+                                    {(!request.suggestedWordings || request.suggestedWordings.length === 0) && !isEditingThis && (
+                                      <button
+                                        type="button"
+                                        disabled={isSavingThis}
+                                        onClick={() => {
+                                          setEditingClarificationId(request.id);
+                                          setEditingClarificationText(request.ruleText);
+                                          setEditingClarificationError(null);
+                                        }}
+                                        className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs flex items-center gap-1"
+                                      >
+                                        <Edit3 className="w-3 h-3" />
+                                        Write clearer wording
+                                      </button>
+                                    )}
+                                    <button
+                                      type="button"
+                                      disabled={isSavingThis}
+                                      onClick={() => handleClarificationDecide(request.id, "dismiss", null, request.ruleId)}
+                                      className="px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-slate-600 text-xs font-medium flex items-center gap-1 transition-all disabled:opacity-50 ml-auto"
+                                      title="Dismiss this clarification; keeps current rule as is. Won't re-raise until at least 3 new disputes occur."
+                                    >
+                                      {isSavingThis ? "Saving..." : "Keep rule as is"}
                                     </button>
                                   </div>
                                 </div>
                               )}
 
-                              {/* Card Actions: Keep rule as is */}
-                              <div className="flex items-center justify-between pt-2 border-t border-slate-100">
-                                {(!request.suggestedWordings || request.suggestedWordings.length === 0) && !isEditingThis && (
-                                  <button
-                                    type="button"
-                                    disabled={isSavingThis}
-                                    onClick={() => {
-                                      setEditingClarificationId(request.id);
-                                      setEditingClarificationText(request.ruleText);
-                                      setEditingClarificationError(null);
-                                    }}
-                                    className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs flex items-center gap-1"
-                                  >
-                                    <Edit3 className="w-3 h-3" />
-                                    Write clearer wording
-                                  </button>
-                                )}
-                                <button
-                                  type="button"
-                                  disabled={isSavingThis}
-                                  onClick={() => handleClarificationDecide(request.id, "dismiss", null, request.ruleId)}
-                                  className="px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-slate-600 text-xs font-medium flex items-center gap-1 transition-all disabled:opacity-50 ml-auto"
-                                  title="Dismiss this clarification; keeps current rule as is. Won't re-raise until at least 3 new disputes occur."
-                                >
-                                  {isSavingThis ? "Saving..." : "Keep rule as is"}
-                                </button>
-                              </div>
-                            </div>
-                          )}
-
-                          {/* Resolved State & Re-check Comparison */}
-                          {request.status === "resolved" && (
-                            <div className="p-3.5 bg-emerald-50/60 border border-emerald-200 rounded-xl space-y-2 text-xs">
-                              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                                <div className="flex items-center gap-1.5 text-emerald-900 font-bold">
-                                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                                  <span>Rule {request.ruleId} updated (v{request.newVersion || 2})</span>
-                                </div>
-                                <button
-                                  type="button"
-                                  disabled={isRecheckingThis}
-                                  onClick={() => handleRecheckClarification(request.id, request.ruleId)}
-                                  className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center gap-1.5 transition-all shadow-2xs disabled:opacity-50 shrink-0"
-                                  title="Re-run review on stored drafts whose findings were disputed for this rule"
-                                >
-                                  {isRecheckingThis ? (
-                                    <>
-                                      <RefreshCw className="w-3 h-3 animate-spin" />
-                                      Re-checking stored drafts...
-                                    </>
-                                  ) : (
-                                    <>
-                                      <RefreshCw className="w-3 h-3" />
-                                      Re-check
-                                    </>
-                                  )}
-                                </button>
-                              </div>
-                              <p className="text-slate-800 font-medium">
-                                <span className="font-bold text-emerald-900">Applied Wording: </span>
-                                "{request.appliedWording}"
-                              </p>
-
-                              {/* Re-check Comparison Result */}
-                              {recheckData && (
-                                <div className="mt-3 pt-3 border-t border-emerald-200 space-y-2.5">
-                                  <div className="flex items-center justify-between text-xs font-bold text-slate-800">
-                                    <span>Before vs After Re-check Verification</span>
-                                    <span className="text-[11px] text-emerald-800 font-normal">
-                                      {recheckData.message}
-                                    </span>
+                              {/* Resolved State & Re-check Comparison */}
+                              {request.status === "resolved" && (
+                                <div className="p-3.5 bg-emerald-50/60 border border-emerald-200 rounded-xl space-y-2 text-xs">
+                                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                                    <div className="flex items-center gap-1.5 text-emerald-900 font-bold">
+                                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                                      <span>Rule {request.ruleId} updated (v{request.newVersion || 2})</span>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      disabled={isRecheckingThis}
+                                      onClick={() => handleRecheckClarification(request.id, request.ruleId)}
+                                      className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center gap-1.5 transition-all shadow-2xs disabled:opacity-50 shrink-0"
+                                      title="Re-run review on stored drafts whose findings were disputed for this rule"
+                                    >
+                                      {isRecheckingThis ? (
+                                        <>
+                                          <RefreshCw className="w-3 h-3 animate-spin" />
+                                          Re-checking stored drafts...
+                                        </>
+                                      ) : (
+                                        <>
+                                          <RefreshCw className="w-3 h-3" />
+                                          Re-check
+                                        </>
+                                      )}
+                                    </button>
                                   </div>
+                                  <p className="text-slate-800 font-medium">
+                                    <span className="font-bold text-emerald-900">Applied Wording: </span>
+                                    "{request.appliedWording}"
+                                  </p>
 
-                                  {recheckData.draftsTested === 0 ? (
-                                    <p className="text-slate-500 italic text-[11px] p-2 bg-white rounded-lg border border-slate-200">
-                                      No stored drafts exist for this rule.
-                                    </p>
-                                  ) : (
-                                    <div className="space-y-2">
-                                      <div className="grid grid-cols-3 gap-2 text-center text-xs">
-                                        <div className="p-2 bg-white rounded-lg border border-slate-200">
-                                          <div className="text-slate-500 text-[10px] uppercase font-bold">Before Findings</div>
-                                          <div className="text-base font-bold text-slate-800">{recheckData.beforeFindingsCount}</div>
-                                        </div>
-                                        <div className="p-2 bg-white rounded-lg border border-slate-200">
-                                          <div className="text-slate-500 text-[10px] uppercase font-bold">After Findings</div>
-                                          <div className="text-base font-bold text-slate-800">{recheckData.afterFindingsCount}</div>
-                                        </div>
-                                        <div className="p-2 bg-emerald-100/70 rounded-lg border border-emerald-300">
-                                          <div className="text-emerald-900 text-[10px] uppercase font-bold">Resolved / Disappeared</div>
-                                          <div className="text-base font-bold text-emerald-700">
-                                            {recheckData.disappearedFindings?.length || 0}
-                                          </div>
-                                        </div>
+                                  {/* Re-check Comparison Result */}
+                                  {recheckData && (
+                                    <div className="mt-3 pt-3 border-t border-emerald-200 space-y-2.5">
+                                      <div className="flex items-center justify-between text-xs font-bold text-slate-800">
+                                        <span>Before vs After Re-check Verification</span>
+                                        <span className="text-[11px] text-emerald-800 font-normal">
+                                          {recheckData.message}
+                                        </span>
                                       </div>
 
-                                      {recheckData.disappearedFindings?.length > 0 && (
-                                        <div className="space-y-1 pt-1">
-                                          <span className="text-[10px] font-bold text-emerald-900 uppercase tracking-wider">
-                                            Findings Disappeared Under Clarified Policy:
-                                          </span>
-                                          <div className="space-y-1">
-                                            {recheckData.disappearedFindings.map((df, dfIdx) => (
-                                              <div
-                                                key={dfIdx}
-                                                className="p-2 bg-white rounded-lg border border-emerald-200 text-[11px] flex items-center justify-between gap-2"
-                                              >
-                                                <div>
-                                                  <span className="font-bold text-slate-900 font-mono">"{df.quote}"</span>
-                                                  <span className="text-slate-500 ml-1.5">({df.draftTitle})</span>
-                                                </div>
-                                                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 shrink-0">
-                                                  {df.reason}
-                                                </span>
+                                      {recheckData.draftsTested === 0 ? (
+                                        <p className="text-slate-500 italic text-[11px] p-2 bg-white rounded-lg border border-slate-200">
+                                          No stored drafts exist for this rule.
+                                        </p>
+                                      ) : (
+                                        <div className="space-y-2">
+                                          <div className="grid grid-cols-3 gap-2 text-center text-xs">
+                                            <div className="p-2 bg-white rounded-lg border border-slate-200">
+                                              <div className="text-slate-500 text-[10px] uppercase font-bold">Before Findings</div>
+                                              <div className="text-base font-bold text-slate-800">{recheckData.beforeFindingsCount}</div>
+                                            </div>
+                                            <div className="p-2 bg-white rounded-lg border border-slate-200">
+                                              <div className="text-slate-500 text-[10px] uppercase font-bold">After Findings</div>
+                                              <div className="text-base font-bold text-slate-800">{recheckData.afterFindingsCount}</div>
+                                            </div>
+                                            <div className="p-2 bg-emerald-100/70 rounded-lg border border-emerald-300">
+                                              <div className="text-emerald-900 text-[10px] uppercase font-bold">Resolved / Disappeared</div>
+                                              <div className="text-base font-bold text-emerald-700">
+                                                {recheckData.disappearedFindings?.length || 0}
                                               </div>
-                                            ))}
+                                            </div>
                                           </div>
+
+                                          {recheckData.disappearedFindings?.length > 0 && (
+                                            <div className="space-y-1 pt-1">
+                                              <span className="text-[10px] font-bold text-emerald-900 uppercase tracking-wider">
+                                                Findings Disappeared Under Clarified Policy:
+                                              </span>
+                                              <div className="space-y-1">
+                                                {recheckData.disappearedFindings.map((df, dfIdx) => (
+                                                  <div
+                                                    key={dfIdx}
+                                                    className="p-2 bg-white rounded-lg border border-emerald-200 text-[11px] flex items-center justify-between gap-2"
+                                                  >
+                                                    <div>
+                                                      <span className="font-bold text-slate-900 font-mono">"{df.quote}"</span>
+                                                      <span className="text-slate-500 ml-1.5">({df.draftTitle})</span>
+                                                    </div>
+                                                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 shrink-0">
+                                                      {df.reason}
+                                                    </span>
+                                                  </div>
+                                                ))}
+                                              </div>
+                                            </div>
+                                          )}
                                         </div>
                                       )}
                                     </div>
@@ -3216,14 +3324,73 @@ export default function App() {
                                 </div>
                               )}
                             </div>
-                          )}
-                        </div>
-                      );
-                    })}
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {/* Collapsed Dismissed (N) List */}
+                    {dismissedClarificationsList.length > 0 && (
+                      <div className="pt-2 border-t border-slate-200">
+                        <button
+                          type="button"
+                          onClick={() => setShowDismissedClarifications(!showDismissedClarifications)}
+                          className="w-full py-2.5 px-3.5 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-xl flex items-center justify-between text-xs font-bold text-slate-700 transition-colors"
+                        >
+                          <div className="flex items-center gap-2">
+                            <span>Dismissed ({dismissedClarificationsList.length})</span>
+                            <span className="text-[11px] font-normal text-slate-500">
+                              Policies kept as is without wording change
+                            </span>
+                          </div>
+                          <ChevronDown className={`w-4 h-4 text-slate-500 transition-transform ${showDismissedClarifications ? "rotate-180" : ""}`} />
+                        </button>
+
+                        {showDismissedClarifications && (
+                          <div className="mt-3 space-y-3">
+                            {dismissedClarificationsList.map((dReq) => (
+                              <div
+                                key={dReq.id}
+                                className="p-3.5 bg-slate-50/70 border border-slate-200 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+                              >
+                                <div className="space-y-1">
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-mono font-bold text-slate-800">{dReq.ruleId}</span>
+                                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-200 text-slate-700">Dismissed</span>
+                                    <span className="text-slate-500 text-[11px]">
+                                      Disputed {dReq.stats?.disputedCount} of {dReq.stats?.decidedCount} times
+                                    </span>
+                                  </div>
+                                  <p className="text-slate-700 font-medium">"{dReq.ruleText}"</p>
+                                </div>
+                                <button
+                                  type="button"
+                                  disabled={reopeningClarificationId === dReq.id}
+                                  onClick={() => handleReopenClarification(dReq.id, dReq.ruleId)}
+                                  className="px-3 py-1.5 rounded-lg bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 font-bold text-xs flex items-center gap-1.5 transition-all disabled:opacity-50 shrink-0 shadow-2xs"
+                                >
+                                  {reopeningClarificationId === dReq.id ? (
+                                    <>
+                                      <RefreshCw className="w-3 h-3 animate-spin" />
+                                      Reopening...
+                                    </>
+                                  ) : (
+                                    <>
+                                      <RotateCcw className="w-3 h-3" />
+                                      Reopen
+                                    </>
+                                  )}
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
-            </div>
+                </div>
+              );
+            })()}
 
             {/* Rules Library */}
             <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
@@ -4211,6 +4378,78 @@ export default function App() {
               </div>
             )}
 
+            {/* RECENT DRAFTS LIST */}
+            {allDrafts.length > 0 && (
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs p-4 sm:p-5 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <History className="w-4 h-4 text-slate-500" />
+                    <h3 className="font-bold text-slate-800 text-sm">Recent Drafts ({allDrafts.length})</h3>
+                  </div>
+                  {activeDraft && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveDraft(null);
+                        setSelectedFindingId(null);
+                      }}
+                      className="text-xs font-semibold text-blue-600 hover:text-blue-800 flex items-center gap-1"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>Start new draft check</span>
+                    </button>
+                  )}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                  {allDrafts.map((d) => {
+                    const isSelected = activeDraft && activeDraft.id === d.id;
+                    const findingsCount = d.findings ? d.findings.length : 0;
+                    const isDemo = d.isDemo || d.id?.includes("demo");
+                    return (
+                      <div
+                        key={d.id}
+                        onClick={() => {
+                          setActiveDraft(d);
+                          if (d.isVisual) {
+                            setCreatorMode("visual");
+                          } else {
+                            setCreatorMode("text");
+                          }
+                        }}
+                        className={`cursor-pointer p-3 rounded-xl border text-left transition-all ${
+                          isSelected
+                            ? "bg-blue-50/70 border-blue-400 ring-1 ring-blue-300 shadow-2xs"
+                            : "bg-slate-50 hover:bg-slate-100 border-slate-200"
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-1.5 mb-1.5">
+                          <span className="font-bold text-xs text-slate-800 truncate" title={d.title}>
+                            {d.title || "Untitled Draft"}
+                          </span>
+                          <div className="flex items-center gap-1 shrink-0">
+                            {isDemo && (
+                              <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-purple-100 text-purple-800">
+                                Demo data
+                              </span>
+                            )}
+                            {isSelected && (
+                              <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-blue-600 text-white">
+                                Viewing
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex items-center justify-between text-[11px] text-slate-500">
+                          <span className="truncate max-w-[130px]">{d.channel || (d.isVisual ? "Visual Banner" : "Copy")}</span>
+                          <span className="font-mono">{findingsCount} {findingsCount === 1 ? "finding" : "findings"}</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* Split Screen Review Interface */}
             {isVisualAuditing ? (
               /* Analysing <filename>... Skeleton State */
@@ -4345,13 +4584,31 @@ export default function App() {
                               Visual Banner
                             </span>
                           )}
+                          {(activeDraft.isDemo || activeDraft.id?.includes("demo")) && (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-800">
+                              Demo data
+                            </span>
+                          )}
                         </div>
                         <p className="text-xs text-slate-400">
                           Status: <span className="font-semibold capitalize text-slate-700">{activeDraft.status.replace("_", " ")}</span>
                         </p>
                       </div>
 
-                      <div className="flex items-center gap-1.5 text-[11px]">
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setActiveDraft(null);
+                            setSelectedFindingId(null);
+                          }}
+                          className="px-2.5 py-1 text-xs font-semibold text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors flex items-center gap-1"
+                          title="Deselect draft and show blank creator input"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>New Draft</span>
+                        </button>
+                        <div className="flex items-center gap-1.5 text-[11px]">
                         <span className="flex items-center gap-1 text-red-700 bg-red-50 px-2 py-0.5 rounded">
                           <span className="w-1.5 h-1.5 rounded-full bg-red-500" /> High
                         </span>
@@ -4363,6 +4620,7 @@ export default function App() {
                         </span>
                       </div>
                     </div>
+                  </div>
 
                     {/* Content Section: Visual vs Text */}
                     {activeDraft.isVisual ? (
@@ -4877,9 +5135,13 @@ export default function App() {
               /* Empty state if visitor hasn't run any draft yet */
               <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center space-y-4">
                 <FileText className="w-10 h-10 text-slate-300 mx-auto" />
-                <h3 className="text-base font-bold text-slate-800">No Drafts in Workspace</h3>
+                <h3 className="text-base font-bold text-slate-800">
+                  {allDrafts.length > 0 ? "Select a Draft to Review or Check New Copy" : "No Drafts in Workspace"}
+                </h3>
                 <p className="text-xs text-slate-500 max-w-md mx-auto">
-                  Submit a written marketing draft or upload a banner image above to run the explainable BrandGuard check.
+                  {allDrafts.length > 0
+                    ? "Click any draft in the Recent Drafts list above to inspect its governance findings, or submit new copy using the form above."
+                    : "Submit a written marketing draft or upload a banner image above to run the explainable BrandGuard check."}
                 </p>
                 <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
                   <button

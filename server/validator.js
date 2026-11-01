@@ -648,6 +648,7 @@ export function validateFindings(
 
   const accepted = [];
   const rejected = [];
+  const usedQuoteIndices = new Map();
 
   if (rawList.length === 0 && !Array.isArray(rawFindings) && typeof rawFindings !== "object" && deterministicToneFindings.length === 0) {
     return {
@@ -782,9 +783,17 @@ export function validateFindings(
     } else if (!suggestedFix) {
       needsHumanJudgement = true;
     } else {
-      // Fact F-01 safe fix normalization: "Reliable" is a new claim not in fact F-01. "Battery lasts up to 12 hours." is safer.
-      if ((ruleId === "F-01" || ruleId.includes("F-01")) && /\breliable\b/i.test(suggestedFix)) {
-        suggestedFix = "Battery lasts up to 12 hours.";
+      // If a fact fix contains an unverified claim (such as "reliable") not supported by the fact,
+      // build a compliant fix directly from the fact text in the approved library (never a hard-coded literal string).
+      if (ruleId.startsWith("F-") && /\breliable\b/i.test(suggestedFix)) {
+        const matchedFact = facts.find(f => f.id.trim().toUpperCase() === ruleId.trim().toUpperCase());
+        if (matchedFact && matchedFact.text) {
+          const cleanText = matchedFact.text.replace(/\s*\([^)]*\)/g, "").replace(/\.$/, "").trim();
+          const tokens = cleanText.split(/\s+/);
+          const startsWithBrand = brandTerms.some(b => b.toLowerCase() === tokens[0]?.toLowerCase());
+          const clause = startsWithBrand ? tokens.slice(1).join(" ") : tokens.join(" ");
+          suggestedFix = clause.charAt(0).toUpperCase() + clause.slice(1) + ".";
+        }
       }
       // Reject any suggested fix that leaves the sentence ungrammatical in an obvious way
       const grammarCheck = validateFixGrammar(draftText, quote, suggestedFix);
@@ -806,6 +815,26 @@ export function validateFindings(
         reasons: rejectionReasons
       });
     } else {
+      // Resolve start and end character offsets in draftText
+      let startOffset = typeof finding.startIndex === "number" ? finding.startIndex : (typeof finding.start === "number" ? finding.start : -1);
+      let endOffset = typeof finding.endIndex === "number" ? finding.endIndex : (typeof finding.end === "number" ? finding.end : -1);
+
+      if (startOffset < 0 && draftText && quote) {
+        const fromIdx = (usedQuoteIndices.get(quote) !== undefined ? usedQuoteIndices.get(quote) + 1 : 0);
+        const nextIdx = draftText.indexOf(quote, fromIdx);
+        if (nextIdx !== -1) {
+          startOffset = nextIdx;
+          endOffset = nextIdx + quote.length;
+          usedQuoteIndices.set(quote, nextIdx);
+        } else {
+          const firstIdx = draftText.indexOf(quote);
+          if (firstIdx !== -1) {
+            startOffset = firstIdx;
+            endOffset = firstIdx + quote.length;
+          }
+        }
+      }
+
       accepted.push({
         id: `finding-${Date.now()}-${i}`,
         quote: quote,
@@ -821,7 +850,11 @@ export function validateFindings(
         action: action,
         needs_human_judgement: needsHumanJudgement,
         status: "pending",
-        rawIndex: i
+        rawIndex: i,
+        start: startOffset >= 0 ? startOffset : undefined,
+        end: endOffset >= 0 ? endOffset : undefined,
+        startIndex: startOffset >= 0 ? startOffset : undefined,
+        endIndex: endOffset >= 0 ? endOffset : undefined
       });
     }
   }
