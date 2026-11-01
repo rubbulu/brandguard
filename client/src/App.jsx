@@ -20,6 +20,7 @@ import {
   History,
   Info,
   ChevronRight,
+  ChevronDown,
   Plus,
   RotateCcw,
   Save,
@@ -125,6 +126,25 @@ export default function App() {
   const [brandTermsText, setBrandTermsText] = useState("CampusPro");
   const [toneSettingsError, setToneSettingsError] = useState(null);
   const [isSavingToneSettings, setIsSavingToneSettings] = useState(false);
+
+  // Brand Guideline Document Import (Brand Manager)
+  const [guidelineInputTab, setGuidelineInputTab] = useState("paste"); // "paste" | "upload"
+  const [guidelineText, setGuidelineText] = useState("");
+  const [guidelineFileBase64, setGuidelineFileBase64] = useState(null);
+  const [guidelineFileName, setGuidelineFileName] = useState("");
+  const [isExtractingGuideline, setIsExtractingGuideline] = useState(false);
+  const [guidelineError, setGuidelineError] = useState(null);
+  const [proposals, setProposals] = useState([]);
+  const [blockedLines, setBlockedLines] = useState([]);
+  const [droppedProposals, setDroppedProposals] = useState([]);
+  const [lastImportStats, setLastImportStats] = useState(null);
+  const [isTruncated, setIsTruncated] = useState(false);
+  const [originalLength, setOriginalLength] = useState(0);
+  const [showWhyDropped, setShowWhyDropped] = useState(false);
+  const [editingProposalId, setEditingProposalId] = useState(null);
+  const [editedProposalData, setEditedProposalData] = useState({});
+  const [isProposalActionPending, setIsProposalActionPending] = useState(false);
+  const guidelineFileInputRef = useRef(null);
 
   // Compare Channels State (Content Creator)
   const [showCompareModal, setShowCompareModal] = useState(false);
@@ -284,14 +304,15 @@ export default function App() {
 
   const loadWorkspaceData = async () => {
     try {
-      const [rulesRes, factsRes, samplesRes, draftsRes, insightsRes, visualRes, toneRes] = await Promise.all([
+      const [rulesRes, factsRes, samplesRes, draftsRes, insightsRes, visualRes, toneRes, guidelinesRes] = await Promise.all([
         wsFetch("/api/rules"),
         wsFetch("/api/facts"),
         wsFetch("/api/sample-drafts"),
         wsFetch("/api/drafts"),
         wsFetch("/api/insights"),
         wsFetch("/api/visual-settings"),
-        wsFetch("/api/tone-settings")
+        wsFetch("/api/tone-settings"),
+        wsFetch("/api/guidelines/proposals")
       ]);
 
       if (rulesRes.ok) setRules(await rulesRes.json());
@@ -318,6 +339,17 @@ export default function App() {
         const toneData = await toneRes.json();
         if (toneData.toneProfiles) setToneProfiles(toneData.toneProfiles);
         if (Array.isArray(toneData.brandTerms)) setBrandTermsText(toneData.brandTerms.join(", "));
+      }
+      if (guidelinesRes && guidelinesRes.ok) {
+        const gData = await guidelinesRes.json();
+        setProposals(gData.proposals || []);
+        if (gData.lastImport) {
+          setLastImportStats(gData.lastImport.stats || null);
+          setBlockedLines(gData.lastImport.blockedLines || []);
+          setDroppedProposals(gData.lastImport.dropped || []);
+          setIsTruncated(Boolean(gData.lastImport.truncated));
+          setOriginalLength(gData.lastImport.originalLength || 0);
+        }
       }
     } catch (e) {
       console.error("Error loading workspace data", e);
@@ -698,6 +730,16 @@ export default function App() {
         setActiveDraft(null);
         setEditingRule(null);
         setEditingFact(null);
+        setGuidelineText("");
+        setGuidelineFileBase64(null);
+        setGuidelineFileName("");
+        setGuidelineError(null);
+        setProposals([]);
+        setBlockedLines([]);
+        setDroppedProposals([]);
+        setLastImportStats(null);
+        setIsTruncated(false);
+        setEditingProposalId(null);
         await loadWorkspaceData();
         showNotice("Workspace reset to clean initial state.");
       }
@@ -1066,6 +1108,179 @@ export default function App() {
       showNotice(`Fact ${id} deleted.`);
     } catch (err) {
       console.error(err);
+    }
+  };
+
+  // Manager: Guideline Import & Proposals Handlers
+  const handleTrySampleGuideline = async () => {
+    setGuidelineError(null);
+    try {
+      const res = await wsFetch("/api/guidelines/sample");
+      if (res.ok) {
+        const data = await res.json();
+        setGuidelineText(data.text);
+        setGuidelineInputTab("paste");
+        showNotice("Loaded sample brand guideline for CampusPro (~12 sentences).");
+      } else {
+        const err = await res.json();
+        setGuidelineError(err.error || "Failed to load sample guideline.");
+      }
+    } catch (e) {
+      setGuidelineError("Network error loading sample guideline.");
+    }
+  };
+
+  const handleGuidelineFileChange = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setGuidelineError(null);
+
+    // Enforce 2 MB limit
+    if (file.size > 2 * 1024 * 1024) {
+      setGuidelineError(`File size (${(file.size / (1024 * 1024)).toFixed(2)} MB) exceeds 2 MB limit.`);
+      if (guidelineFileInputRef.current) guidelineFileInputRef.current.value = "";
+      return;
+    }
+
+    // Check extension
+    const ext = file.name.split(".").pop().toLowerCase();
+    if (!["txt", "md", "docx", "pdf"].includes(ext)) {
+      setGuidelineError(`Unsupported file extension ".${ext}". Please upload a .txt, .md, .docx, or .pdf document.`);
+      if (guidelineFileInputRef.current) guidelineFileInputRef.current.value = "";
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (loadEvent) => {
+      setGuidelineFileBase64(loadEvent.target.result);
+      setGuidelineFileName(file.name);
+    };
+    reader.onerror = () => {
+      setGuidelineError("Failed to read file.");
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleExtractProposals = async () => {
+    setGuidelineError(null);
+    if (guidelineInputTab === "paste" && !guidelineText.trim()) {
+      setGuidelineError("Please enter or paste guideline text, or click 'Try sample guideline'.");
+      return;
+    }
+    if (guidelineInputTab === "upload" && !guidelineFileBase64) {
+      setGuidelineError("Please select a guideline document (.txt, .md, .docx, or .pdf).");
+      return;
+    }
+
+    setIsExtractingGuideline(true);
+    try {
+      const payload = {
+        text: guidelineInputTab === "paste" ? guidelineText : undefined,
+        fileBase64: guidelineInputTab === "upload" ? guidelineFileBase64 : undefined,
+        fileName: guidelineInputTab === "upload" ? guidelineFileName : "Pasted guideline text",
+        sourceName: guidelineInputTab === "upload" ? guidelineFileName : "Pasted guideline text"
+      };
+
+      const res = await wsFetch("/api/guidelines/extract", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+
+      const data = await res.json();
+      if (res.ok) {
+        setProposals(data.proposals || []);
+        setLastImportStats(data.stats || null);
+        setBlockedLines(data.blockedLines || []);
+        setDroppedProposals(data.dropped || []);
+        setIsTruncated(Boolean(data.truncated));
+        setOriginalLength(data.originalLength || 0);
+        await loadWorkspaceData();
+        showNotice(`Extracted: ${data.stats.kept} proposals kept, ${data.stats.dropped} dropped, ${data.stats.blocked} blocked.`);
+      } else {
+        setGuidelineError(data.error || "Failed to extract proposals from guideline.");
+      }
+    } catch (e) {
+      setGuidelineError(`Network error during guideline extraction: ${e.message}`);
+    } finally {
+      setIsExtractingGuideline(false);
+    }
+  };
+
+  const handleProposalDecision = async (proposalId, action, editedData = null) => {
+    if (isProposalActionPending) return;
+    setIsProposalActionPending(true);
+    try {
+      const res = await wsFetch(`/api/guidelines/proposals/${proposalId}/decide`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, editedData })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setProposals((prev) =>
+          prev.map((p) => (p.id === proposalId ? { ...p, ...data.proposal } : p))
+        );
+        if (data.rules) setRules(data.rules);
+        if (data.facts) setFacts(data.facts);
+        setEditingProposalId(null);
+        setEditedProposalData({});
+        await loadWorkspaceData();
+        if (action === "approve" || action === "edit_and_approve") {
+          showNotice(`Approved proposal into library as ${data.createdItem?.id || data.proposal?.approvedId}.`);
+        } else {
+          showNotice("Proposal rejected.");
+        }
+      } else {
+        alert(data.error || "Failed to record proposal decision.");
+      }
+    } catch (e) {
+      alert(`Network error: ${e.message}`);
+    } finally {
+      setIsProposalActionPending(false);
+    }
+  };
+
+  const handleUndoProposal = async (proposalId) => {
+    if (isProposalActionPending) return;
+    setIsProposalActionPending(true);
+    try {
+      const res = await wsFetch(`/api/guidelines/proposals/${proposalId}/undo`, {
+        method: "POST"
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setProposals((prev) =>
+          prev.map((p) => (p.id === proposalId ? { ...p, ...data.proposal } : p))
+        );
+        if (data.rules) setRules(data.rules);
+        if (data.facts) setFacts(data.facts);
+        await loadWorkspaceData();
+        showNotice(data.message || "Approval undone. Rule/fact removed from library.");
+      } else {
+        alert(data.error || "Failed to undo approval.");
+      }
+    } catch (e) {
+      alert(`Network error: ${e.message}`);
+    } finally {
+      setIsProposalActionPending(false);
+    }
+  };
+
+  const handleClearProposals = async () => {
+    if (!window.confirm("Clear all proposals from the review queue? (Active library rules and facts will remain intact)")) return;
+    try {
+      const res = await wsFetch("/api/guidelines/proposals", { method: "DELETE" });
+      if (res.ok) {
+        setProposals([]);
+        setLastImportStats(null);
+        setBlockedLines([]);
+        setDroppedProposals([]);
+        setIsTruncated(false);
+        showNotice("Review queue cleared.");
+      }
+    } catch (e) {
+      console.error(e);
     }
   };
 
@@ -1751,6 +1966,14 @@ export default function App() {
                 <p className="text-xs text-slate-500">
                   Rules and verified facts enforced by BrandGuard. Every AI finding must cite a valid ID from these libraries.
                 </p>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-lg bg-blue-50 text-blue-700 border border-blue-200">
+                    Rules in library: {rules.length} ({rules.filter(r => r.source).length} imported)
+                  </span>
+                  <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-lg bg-purple-50 text-purple-700 border border-purple-200">
+                    Facts in library: {facts.length} ({facts.filter(f => f.source).length} imported)
+                  </span>
+                </div>
               </div>
               <div className="flex items-center gap-2">
                 <button
@@ -1763,11 +1986,484 @@ export default function App() {
               </div>
             </div>
 
+            {/* IMPORT BRAND GUIDELINES (AI PROPOSALS & HUMAN REVIEW QUEUE) */}
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
+              <div className="p-4 sm:p-5 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <BookOpen className="w-5 h-5 text-blue-600" />
+                    <h2 className="font-bold text-slate-900 text-base">Import Brand Guidelines</h2>
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-50 text-blue-700">
+                      AI Proposals & Human Review Queue
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Upload or paste brand documents (.pdf, .docx, .txt, .md). Proposals require brand manager approval before entering the library.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleTrySampleGuideline}
+                    className="px-3 py-1.5 rounded-xl bg-amber-50 border border-amber-200 hover:bg-amber-100 text-amber-800 text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs"
+                    title="Load fictional CampusPro guideline with 2 rules, 2 facts, 1 duplicate, and 1 adversarial injection test line"
+                  >
+                    <Sparkles className="w-3.5 h-3.5 text-amber-600" />
+                    Try sample guideline
+                  </button>
+                  {proposals.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={handleClearProposals}
+                      className="px-2.5 py-1.5 rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-500 text-xs font-medium transition-all"
+                    >
+                      Clear Queue
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="p-4 sm:p-5 space-y-4">
+                {/* Input Mode Selector */}
+                <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
+                  <button
+                    type="button"
+                    onClick={() => { setGuidelineInputTab("paste"); setGuidelineError(null); }}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                      guidelineInputTab === "paste"
+                        ? "bg-blue-600 text-white shadow-2xs"
+                        : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                    }`}
+                  >
+                    Paste Guideline Text
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setGuidelineInputTab("upload"); setGuidelineError(null); }}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                      guidelineInputTab === "upload"
+                        ? "bg-blue-600 text-white shadow-2xs"
+                        : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                    }`}
+                  >
+                    Upload File (.txt, .md, .docx, .pdf)
+                  </button>
+                </div>
+
+                {/* Paste Tab */}
+                {guidelineInputTab === "paste" && (
+                  <div>
+                    <textarea
+                      rows={5}
+                      value={guidelineText}
+                      onChange={(e) => setGuidelineText(e.target.value)}
+                      placeholder="Paste brand guideline statements, policy specifications, or approved facts here... or click 'Try sample guideline' above."
+                      className="w-full p-3 text-xs rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-slate-800"
+                    />
+                    <div className="flex items-center justify-between text-[11px] text-slate-400 mt-1">
+                      <span>Characters: {guidelineText.length} / 15,000 max (excess characters automatically truncated)</span>
+                      {guidelineText.length > 15000 && (
+                        <span className="text-amber-600 font-medium">Text will be truncated to first 15,000 characters</span>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Upload Tab */}
+                {guidelineInputTab === "upload" && (
+                  <div>
+                    <div className="border-2 border-dashed border-slate-200 hover:border-blue-400 rounded-xl p-6 text-center transition-colors bg-slate-50/50">
+                      <Upload className="w-8 h-8 text-slate-400 mx-auto mb-2" />
+                      <p className="text-xs font-bold text-slate-700">
+                        {guidelineFileName ? guidelineFileName : "Choose a guideline document"}
+                      </p>
+                      <p className="text-[11px] text-slate-400 mt-1">
+                        Supports text-based .pdf, .docx, .txt, .md (max 2 MB)
+                      </p>
+                      <input
+                        ref={guidelineFileInputRef}
+                        type="file"
+                        accept=".txt,.md,.docx,.pdf"
+                        onChange={handleGuidelineFileChange}
+                        className="hidden"
+                        id="guideline-file-upload"
+                      />
+                      <label
+                        htmlFor="guideline-file-upload"
+                        className="mt-3 inline-block px-4 py-1.5 rounded-lg bg-white border border-slate-300 text-slate-700 text-xs font-bold hover:bg-slate-50 cursor-pointer shadow-2xs"
+                      >
+                        {guidelineFileName ? "Change File" : "Select File from Computer"}
+                      </label>
+                    </div>
+                  </div>
+                )}
+
+                {/* Error display with Retry */}
+                {guidelineError && (
+                  <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <AlertTriangle className="w-4 h-4 shrink-0 text-red-600" />
+                      <span>{guidelineError}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleExtractProposals}
+                      className="px-2.5 py-1 rounded bg-red-100 hover:bg-red-200 text-red-800 text-[11px] font-bold"
+                    >
+                      Retry
+                    </button>
+                  </div>
+                )}
+
+                {/* Truncation Notice */}
+                {isTruncated && (
+                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-800 flex items-center gap-2">
+                    <Info className="w-4 h-4 shrink-0 text-amber-600" />
+                    <span>
+                      <strong>Document Truncated:</strong> The document exceeded the 15,000 character limit ({originalLength.toLocaleString()} characters) and was truncated to the first 15,000 characters.
+                    </span>
+                  </div>
+                )}
+
+                {/* Extract CTA Button */}
+                <div className="flex items-center justify-end gap-3 pt-1">
+                  <button
+                    type="button"
+                    disabled={isExtractingGuideline || (guidelineInputTab === "paste" ? !guidelineText.trim() : !guidelineFileBase64)}
+                    onClick={handleExtractProposals}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white rounded-xl text-xs font-bold transition-all shadow-2xs flex items-center gap-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    {isExtractingGuideline ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        Analyzing Guidelines & Extracting Proposals...
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="w-3.5 h-3.5" />
+                        Extract Rules & Facts
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                {/* Stats Strip */}
+                {lastImportStats && (
+                  <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl flex flex-wrap items-center justify-between gap-3 text-xs">
+                    <div className="flex items-center gap-3">
+                      <span className="font-bold text-slate-800">Extraction Results:</span>
+                      <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-green-100 text-green-800">
+                        {lastImportStats.kept} Kept
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setShowWhyDropped(!showWhyDropped)}
+                        className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-800 hover:bg-amber-200 transition-colors flex items-center gap-1"
+                      >
+                        {lastImportStats.dropped} Dropped
+                        <ChevronDown className={`w-3 h-3 transition-transform ${showWhyDropped ? "rotate-180" : ""}`} />
+                      </button>
+                      <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-red-100 text-red-800">
+                        {lastImportStats.blocked} Blocked
+                      </span>
+                    </div>
+                    <span className="text-[11px] text-slate-500">
+                      Source: {lastImportStats.kept > 0 ? proposals[0]?.sourceName || "Imported guideline" : "Guideline document"}
+                    </span>
+                  </div>
+                )}
+
+                {/* Blocked Lines Panel (SEC-01) */}
+                {blockedLines.length > 0 && (
+                  <div className="p-4 bg-red-50/80 border border-red-200 rounded-xl space-y-2">
+                    <div className="flex items-center gap-2 text-xs font-bold text-red-800">
+                      <Shield className="w-4 h-4 text-red-600" />
+                      <span>Blocked Lines ({blockedLines.length}) — SEC-01 Adversarial Prompt Injection Defense</span>
+                    </div>
+                    <p className="text-[11px] text-red-700">
+                      The following instruction-like lines were detected by the deterministic security scanner. They were blocked and prevented from becoming library rules:
+                    </p>
+                    <div className="space-y-1.5 pt-1">
+                      {blockedLines.map((b, idx) => (
+                        <div key={idx} className="p-2 bg-white rounded-lg border border-red-200 text-xs font-mono text-red-800 flex items-center justify-between">
+                          <span>"{b.line}"</span>
+                          <span className="text-[10px] uppercase font-bold text-red-600 bg-red-100 px-2 py-0.5 rounded">
+                            Blocked: {b.reason}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Why Dropped Collapsible Panel */}
+                {showWhyDropped && droppedProposals.length > 0 && (
+                  <div className="p-4 bg-amber-50/80 border border-amber-200 rounded-xl space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2 text-xs font-bold text-amber-900">
+                        <Info className="w-4 h-4 text-amber-700" />
+                        <span>Why Dropped? ({droppedProposals.length} proposals rejected by code-based validator)</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setShowWhyDropped(false)}
+                        className="text-xs text-amber-800 hover:text-amber-950 font-bold"
+                      >
+                        Close
+                      </button>
+                    </div>
+                    <div className="space-y-1.5 pt-1">
+                      {droppedProposals.map((d, idx) => (
+                        <div key={idx} className="p-2 bg-white rounded-lg border border-amber-200 text-xs text-slate-800">
+                          <span className="font-bold text-slate-900">{d.title}: </span>
+                          <span className="text-amber-800 font-medium">{d.reason}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Review Queue Cards */}
+                {proposals.length > 0 && (
+                  <div className="pt-2 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-xs font-extrabold text-slate-800 uppercase tracking-wider">
+                        Human Review Queue ({proposals.filter(p => p.status === "pending").length} Pending Review)
+                      </h3>
+                      <span className="text-[11px] text-slate-500">
+                        Rules and facts enter the library ONLY when explicitly approved by a person.
+                      </span>
+                    </div>
+
+                    <div className="space-y-3">
+                      {proposals.map((proposal) => {
+                        const isEditing = editingProposalId === proposal.id;
+                        return (
+                          <div
+                            key={proposal.id}
+                            className={`p-4 rounded-xl border transition-all ${
+                              proposal.status === "approved"
+                                ? "bg-green-50/40 border-green-200"
+                                : proposal.status === "rejected"
+                                ? "bg-slate-50 border-slate-200 opacity-70"
+                                : "bg-white border-slate-200 shadow-2xs hover:border-blue-300"
+                            }`}
+                          >
+                            <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+                              <div className="space-y-2 flex-1">
+                                {/* Badge Row */}
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span
+                                    className={`px-2 py-0.5 rounded text-[10px] font-extrabold uppercase tracking-wide ${
+                                      proposal.type === "fact"
+                                        ? "bg-purple-100 text-purple-700"
+                                        : "bg-blue-100 text-blue-700"
+                                    }`}
+                                  >
+                                    {proposal.type}
+                                  </span>
+                                  {proposal.category && (
+                                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-700 capitalize">
+                                      {proposal.category}
+                                    </span>
+                                  )}
+                                  {proposal.type === "rule" && proposal.severity && (
+                                    <span
+                                      className={`px-2 py-0.5 rounded text-[10px] font-bold capitalize ${
+                                        proposal.severity === "high"
+                                          ? "bg-red-100 text-red-700"
+                                          : proposal.severity === "medium"
+                                          ? "bg-amber-100 text-amber-700"
+                                          : "bg-slate-100 text-slate-700"
+                                      }`}
+                                    >
+                                      {proposal.severity} severity
+                                    </span>
+                                  )}
+                                  {proposal.duplicateOf && (
+                                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-200 flex items-center gap-1">
+                                      <AlertTriangle className="w-3 h-3 text-amber-600" />
+                                      {proposal.duplicateOf}
+                                    </span>
+                                  )}
+                                  {proposal.status === "approved" && (
+                                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-green-100 text-green-800 flex items-center gap-1">
+                                      <CheckCircle2 className="w-3 h-3 text-green-600" />
+                                      Approved as {proposal.approvedId}
+                                    </span>
+                                  )}
+                                  {proposal.status === "rejected" && (
+                                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-200 text-slate-700">
+                                      Rejected
+                                    </span>
+                                  )}
+                                </div>
+
+                                {/* Proposal Title and Statement */}
+                                {isEditing ? (
+                                  <div className="space-y-2 pt-1 bg-blue-50/50 p-3 rounded-lg border border-blue-200">
+                                    <label className="block text-[11px] font-bold text-slate-700">Edit Proposal Details</label>
+                                    <input
+                                      type="text"
+                                      value={editedProposalData.title ?? proposal.title}
+                                      onChange={(e) => setEditedProposalData({ ...editedProposalData, title: e.target.value })}
+                                      className="w-full px-2.5 py-1 text-xs rounded border border-slate-300 font-bold"
+                                      placeholder="Proposal Title"
+                                    />
+                                    <textarea
+                                      rows={2}
+                                      value={editedProposalData.text ?? proposal.text}
+                                      onChange={(e) => setEditedProposalData({ ...editedProposalData, text: e.target.value })}
+                                      className="w-full px-2.5 py-1 text-xs rounded border border-slate-300 font-medium"
+                                      placeholder="Policy instruction or fact statement"
+                                    />
+                                    {proposal.type === "rule" && (
+                                      <div className="flex items-center gap-3">
+                                        <label className="text-[11px] font-bold text-slate-600">Severity:</label>
+                                        <select
+                                          value={editedProposalData.severity ?? proposal.severity}
+                                          onChange={(e) => setEditedProposalData({ ...editedProposalData, severity: e.target.value })}
+                                          className="px-2 py-1 text-xs rounded border border-slate-300"
+                                        >
+                                          <option value="high">High</option>
+                                          <option value="medium">Medium</option>
+                                          <option value="low">Low</option>
+                                        </select>
+                                      </div>
+                                    )}
+                                    <div className="flex items-center gap-2 pt-1">
+                                      <button
+                                        type="button"
+                                        disabled={isProposalActionPending}
+                                        onClick={() => handleProposalDecision(proposal.id, "edit_and_approve", editedProposalData)}
+                                        className="px-3 py-1 bg-green-600 hover:bg-green-700 text-white rounded text-xs font-bold shadow-2xs"
+                                      >
+                                        Save & Approve
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => { setEditingProposalId(null); setEditedProposalData({}); }}
+                                        className="px-2.5 py-1 text-slate-600 hover:text-slate-800 text-xs font-medium"
+                                      >
+                                        Cancel
+                                      </button>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <>
+                                    <h4 className="text-sm font-bold text-slate-900">{proposal.title}</h4>
+                                    <p className="text-xs text-slate-800 font-medium bg-slate-50 p-2.5 rounded-lg border border-slate-200">
+                                      {proposal.text}
+                                    </p>
+                                  </>
+                                )}
+
+                                {/* Verbatim Source Sentence in Context */}
+                                {proposal.excerpt && (
+                                  <div className="text-[11px] text-slate-600 bg-slate-50/70 p-2.5 rounded-lg border border-slate-200/70">
+                                    <span className="font-bold text-slate-700 block mb-1">Source sentence in context:</span>
+                                    <div className="font-mono text-slate-700 text-[11px]">
+                                      <span>{proposal.excerpt.before}</span>
+                                      <mark className="bg-amber-200/90 text-slate-900 px-1 py-0.5 rounded font-bold mx-0.5">
+                                        {proposal.excerpt.match}
+                                      </mark>
+                                      <span>{proposal.excerpt.after}</span>
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+
+                              {/* Actions Column */}
+                              <div className="flex sm:flex-col items-center gap-2 shrink-0">
+                                {proposal.status === "pending" && !isEditing && (
+                                  <>
+                                    <button
+                                      type="button"
+                                      disabled={isProposalActionPending}
+                                      onClick={() => handleProposalDecision(proposal.id, "approve")}
+                                      className="w-full px-3 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-bold rounded-lg transition-all shadow-2xs flex items-center justify-center gap-1.5"
+                                    >
+                                      <Check className="w-3.5 h-3.5" />
+                                      Approve
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={isProposalActionPending}
+                                      onClick={() => {
+                                        setEditingProposalId(proposal.id);
+                                        setEditedProposalData({
+                                          title: proposal.title,
+                                          text: proposal.text,
+                                          category: proposal.category,
+                                          severity: proposal.severity
+                                        });
+                                      }}
+                                      className="w-full px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-1.5"
+                                    >
+                                      <Edit3 className="w-3.5 h-3.5" />
+                                      Edit & Approve
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={isProposalActionPending}
+                                      onClick={() => handleProposalDecision(proposal.id, "reject")}
+                                      className="w-full px-3 py-1.5 bg-slate-50 hover:bg-red-50 text-slate-600 hover:text-red-700 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-1.5"
+                                    >
+                                      <X className="w-3.5 h-3.5" />
+                                      Reject
+                                    </button>
+                                  </>
+                                )}
+
+                                {proposal.status === "approved" && (
+                                  <div className="space-y-1 text-right">
+                                    <button
+                                      type="button"
+                                      disabled={isProposalActionPending}
+                                      onClick={() => handleUndoProposal(proposal.id)}
+                                      className="px-2.5 py-1 text-xs text-amber-700 hover:text-amber-900 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg font-bold flex items-center gap-1"
+                                      title="Rollback this approval and remove the item from the library"
+                                    >
+                                      <RotateCcw className="w-3 h-3" />
+                                      Undo Approval
+                                    </button>
+                                    <p className="text-[10px] text-slate-400 italic text-right max-w-[140px]">
+                                      Also removable via table delete button below
+                                    </p>
+                                  </div>
+                                )}
+
+                                {proposal.status === "rejected" && (
+                                  <button
+                                    type="button"
+                                    disabled={isProposalActionPending}
+                                    onClick={() => handleProposalDecision(proposal.id, "pending")}
+                                    className="px-2.5 py-1 text-xs text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg font-medium"
+                                  >
+                                    Reconsider
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
             {/* Rules Library */}
             <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
               <div className="p-4 sm:p-5 border-b border-slate-100 flex items-center justify-between">
                 <div>
-                  <h2 className="font-bold text-slate-900 text-base">Active Brand Rules ({rules.length})</h2>
+                  <h2 className="font-bold text-slate-900 text-base flex flex-wrap items-center gap-2">
+                    <span>Active Brand Rules ({rules.length})</span>
+                    <span className="text-xs font-medium text-slate-500">
+                      Rules in library: {rules.length} ({rules.filter(r => r.source).length} imported)
+                    </span>
+                  </h2>
                   <p className="text-xs text-slate-500">Governs claims, tone, terminology, and accessibility</p>
                 </div>
               </div>
@@ -1786,7 +2482,17 @@ export default function App() {
                   <tbody className="divide-y divide-slate-100 text-xs">
                     {rules.map((rule) => (
                       <tr key={rule.id} className="hover:bg-slate-50/50 transition-colors">
-                        <td className="py-3 px-4 font-mono font-bold text-blue-600">{rule.id}</td>
+                        <td className="py-3 px-4 font-mono font-bold text-blue-600">
+                          <div>{rule.id}</div>
+                          {rule.source && (
+                            <span
+                              className="text-[9px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 font-sans font-medium block mt-0.5 max-w-[120px] truncate"
+                              title={rule.source}
+                            >
+                              Imported
+                            </span>
+                          )}
+                        </td>
                         <td className="py-3 px-4">
                           <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-700 capitalize">
                             {rule.category}
@@ -1914,7 +2620,12 @@ export default function App() {
             <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
               <div className="p-4 sm:p-5 border-b border-slate-100 flex items-center justify-between">
                 <div>
-                  <h2 className="font-bold text-slate-900 text-base">Approved Facts Library ({facts.length})</h2>
+                  <h2 className="font-bold text-slate-900 text-base flex flex-wrap items-center gap-2">
+                    <span>Approved Facts Library ({facts.length})</span>
+                    <span className="text-xs font-medium text-slate-500">
+                      Facts in library: {facts.length} ({facts.filter(f => f.source).length} imported)
+                    </span>
+                  </h2>
                   <p className="text-xs text-slate-500">Verified benchmark figures that marketing drafts cannot contradict</p>
                 </div>
               </div>
@@ -1931,7 +2642,17 @@ export default function App() {
                   <tbody className="divide-y divide-slate-100 text-xs">
                     {facts.map((fact) => (
                       <tr key={fact.id} className="hover:bg-slate-50/50 transition-colors">
-                        <td className="py-3 px-4 font-mono font-bold text-purple-600">{fact.id}</td>
+                        <td className="py-3 px-4 font-mono font-bold text-purple-600">
+                          <div>{fact.id}</div>
+                          {fact.source && (
+                            <span
+                              className="text-[9px] px-1.5 py-0.5 rounded bg-purple-50 text-purple-700 font-sans font-medium block mt-0.5 max-w-[120px] truncate"
+                              title={fact.source}
+                            >
+                              Imported
+                            </span>
+                          )}
+                        </td>
                         <td className="py-3 px-4 text-slate-800 font-medium">{fact.text}</td>
                         <td className="py-3 px-4 text-right space-x-1">
                           <button
@@ -2488,7 +3209,7 @@ export default function App() {
                   />
                   <div className="flex items-center justify-between text-[11px] text-slate-400 mt-1">
                     <span>Characters: {draftContent.length} | Words: {draftContent.trim().split(/\s+/).filter(Boolean).length}</span>
-                    <span className="text-slate-500">Rules active: {rules.length} | Facts active: {facts.length}</span>
+                    <span className="text-slate-500">Rules active: {rules.length} ({rules.filter(r => r.source).length} imported) | Facts active: {facts.length} ({facts.filter(f => f.source).length} imported)</span>
                   </div>
                 </div>
 

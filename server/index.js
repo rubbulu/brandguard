@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import path from "path";
+import fs from "fs";
 import { fileURLToPath } from "url";
 import {
   INITIAL_RULES,
@@ -23,6 +24,13 @@ import {
   tamperWithCertificate,
   restoreCertificate
 } from "./certificateService.js";
+import {
+  extractDocumentText,
+  scanDocumentSecurity,
+  validateProposals,
+  getNextId,
+  callGeminiGuidelineExtraction
+} from "./guidelineService.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -211,6 +219,295 @@ app.delete("/api/facts/:id", (req, res) => {
   req.workspace.facts = req.workspace.facts.filter(f => f.id !== factId);
   req.saveWs();
   res.json({ message: `Fact ${factId} deleted`, facts: req.workspace.facts });
+});
+
+// --- 3c. Guideline Document Import & Proposal Review Queue ---
+app.get("/api/guidelines/sample", (req, res) => {
+  try {
+    const samplePath = path.join(__dirname, "../sample-data/sample-brand-guideline.txt");
+    if (!fs.existsSync(samplePath)) {
+      return res.status(404).json({ error: "Sample brand guideline file not found." });
+    }
+    const text = fs.readFileSync(samplePath, "utf-8");
+    res.json({
+      text,
+      fileName: "sample-brand-guideline.txt",
+      sourceName: "sample-brand-guideline.txt"
+    });
+  } catch (err) {
+    res.status(500).json({ error: `Failed to load sample guideline: ${err.message}` });
+  }
+});
+
+app.get("/api/guidelines/proposals", (req, res) => {
+  res.json({
+    proposals: req.workspace.proposals || [],
+    lastImport: req.workspace.lastImport || null
+  });
+});
+
+app.post("/api/guidelines/extract", async (req, res) => {
+  try {
+    const { text, fileBase64, fileName, sourceName } = req.body;
+    let buffer = null;
+
+    if (fileBase64) {
+      const cleaned = fileBase64.replace(/^data:[^;]+;base64,/, "");
+      buffer = Buffer.from(cleaned, "base64");
+    }
+
+    // 1. Ingest text, check magic bytes, enforce 2MB and 15,000 char limits
+    const extractResult = await extractDocumentText({
+      buffer,
+      rawText: text,
+      fileName
+    });
+
+    const fullDocText = extractResult.text;
+    if (!fullDocText || !fullDocText.trim()) {
+      return res.status(400).json({ error: "Document text is empty. Please provide text or upload a document." });
+    }
+
+    // 2. Scan for prompt injection lines (SEC-01)
+    const { safeText, blockedLines } = scanDocumentSecurity(fullDocText);
+
+    // 3. Extract proposals via Gemini
+    let rawProposals = [];
+    if (safeText.trim().length > 0) {
+      try {
+        rawProposals = await callGeminiGuidelineExtraction({
+          apiKey: GEMINI_API_KEY,
+          safeText
+        });
+      } catch (aiErr) {
+        return res.status(502).json({
+          error: `AI proposal extraction failed: ${aiErr.message}`,
+          canRetry: true
+        });
+      }
+    }
+
+    // 4. Validate proposals in code (verbatim source sentence, injection check, dedupe, library duplicate check)
+    const validated = validateProposals({
+      rawProposals,
+      fullDocumentText: fullDocText,
+      existingRules: req.workspace.rules || [],
+      existingFacts: req.workspace.facts || []
+    });
+
+    const effectiveSourceName = fileName || sourceName || "Pasted guideline text";
+
+    const keptWithMetadata = validated.kept.map(p => ({
+      ...p,
+      sourceName: effectiveSourceName,
+      importedAt: new Date().toISOString()
+    }));
+
+    if (!Array.isArray(req.workspace.proposals)) {
+      req.workspace.proposals = [];
+    }
+
+    // Filter out previously pending if replacing, or merge
+    req.workspace.proposals = [...keptWithMetadata, ...req.workspace.proposals.filter(p => p.status !== "pending")];
+
+    req.workspace.lastImport = {
+      sourceName: effectiveSourceName,
+      stats: {
+        kept: keptWithMetadata.length,
+        dropped: validated.dropped.length,
+        blocked: blockedLines.length
+      },
+      blockedLines,
+      dropped: validated.dropped,
+      truncated: extractResult.truncated,
+      originalLength: extractResult.originalLength,
+      truncatedLength: extractResult.truncatedLength,
+      importedAt: new Date().toISOString()
+    };
+
+    req.saveWs();
+
+    res.json({
+      proposals: req.workspace.proposals,
+      newProposals: keptWithMetadata,
+      stats: req.workspace.lastImport.stats,
+      blockedLines,
+      dropped: validated.dropped,
+      truncated: extractResult.truncated,
+      originalLength: extractResult.originalLength,
+      truncationNotice: extractResult.truncationNotice
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message, canRetry: true });
+  }
+});
+
+app.post("/api/guidelines/proposals/:id/decide", (req, res) => {
+  const proposalId = req.params.id;
+  const { action, editedData } = req.body;
+
+  if (!Array.isArray(req.workspace.proposals)) {
+    req.workspace.proposals = [];
+  }
+
+  const proposal = req.workspace.proposals.find(p => p.id === proposalId);
+  if (!proposal) {
+    return res.status(404).json({ error: `Proposal "${proposalId}" not found.` });
+  }
+
+  // Prevent double-click duplicates
+  if (proposal.status === "approved" && (action === "approve" || action === "edit_and_approve")) {
+    return res.json({
+      message: "Proposal was already approved.",
+      proposal,
+      rules: req.workspace.rules,
+      facts: req.workspace.facts
+    });
+  }
+
+  if (action === "approve" || action === "edit_and_approve") {
+    if (editedData) {
+      if (editedData.title) proposal.title = editedData.title.trim();
+      if (editedData.text) proposal.text = editedData.text.trim();
+      if (editedData.category) proposal.category = editedData.category.toLowerCase();
+      if (editedData.severity && ["high", "medium", "low"].includes(editedData.severity.toLowerCase())) {
+        proposal.severity = editedData.severity.toLowerCase();
+      }
+    }
+
+    const assignedId = getNextId(proposal.type, req.workspace);
+    const sourceLabel = `imported from ${proposal.sourceName || "guideline document"}`;
+    const importedAt = new Date().toISOString();
+
+    let createdItem;
+    if (proposal.type === "rule") {
+      createdItem = {
+        id: assignedId,
+        category: proposal.category || "claim",
+        text: proposal.text.trim(),
+        severity: proposal.severity || "medium",
+        source: sourceLabel,
+        importedAt
+      };
+      req.workspace.rules.push(createdItem);
+    } else {
+      createdItem = {
+        id: assignedId,
+        text: proposal.text.trim(),
+        source: sourceLabel,
+        importedAt
+      };
+      req.workspace.facts.push(createdItem);
+    }
+
+    proposal.status = "approved";
+    proposal.approvedId = assignedId;
+
+    if (!Array.isArray(req.workspace.auditTrail)) {
+      req.workspace.auditTrail = [];
+    }
+    req.workspace.auditTrail.push({
+      id: `audit-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      timestamp: importedAt,
+      action: action === "edit_and_approve" ? "guideline_proposal_edited_and_approved" : "guideline_proposal_approved",
+      user: "Brand Manager",
+      proposalId: proposal.id,
+      assignedId,
+      type: proposal.type,
+      title: proposal.title
+    });
+
+    req.saveWs();
+
+    res.json({
+      success: true,
+      proposal,
+      createdItem,
+      rules: req.workspace.rules,
+      facts: req.workspace.facts
+    });
+  } else if (action === "reject") {
+    proposal.status = "rejected";
+
+    if (!Array.isArray(req.workspace.auditTrail)) {
+      req.workspace.auditTrail = [];
+    }
+    req.workspace.auditTrail.push({
+      id: `audit-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      timestamp: new Date().toISOString(),
+      action: "guideline_proposal_rejected",
+      user: "Brand Manager",
+      proposalId: proposal.id,
+      title: proposal.title
+    });
+
+    req.saveWs();
+
+    res.json({
+      success: true,
+      proposal,
+      rules: req.workspace.rules,
+      facts: req.workspace.facts
+    });
+  } else {
+    res.status(400).json({ error: `Unknown decision action "${action}". Must be "approve", "edit_and_approve", or "reject".` });
+  }
+});
+
+app.post("/api/guidelines/proposals/:id/undo", (req, res) => {
+  const proposalId = req.params.id;
+  if (!Array.isArray(req.workspace.proposals)) {
+    return res.status(404).json({ error: "No proposals found." });
+  }
+
+  const proposal = req.workspace.proposals.find(p => p.id === proposalId);
+  if (!proposal) {
+    return res.status(404).json({ error: `Proposal "${proposalId}" not found.` });
+  }
+
+  if (proposal.status !== "approved" || !proposal.approvedId) {
+    return res.status(400).json({ error: "Only approved proposals can be undone." });
+  }
+
+  const targetId = proposal.approvedId;
+  if (proposal.type === "rule") {
+    req.workspace.rules = (req.workspace.rules || []).filter(r => r.id !== targetId);
+  } else {
+    req.workspace.facts = (req.workspace.facts || []).filter(f => f.id !== targetId);
+  }
+
+  proposal.status = "pending";
+  delete proposal.approvedId;
+
+  if (!Array.isArray(req.workspace.auditTrail)) {
+    req.workspace.auditTrail = [];
+  }
+  req.workspace.auditTrail.push({
+    id: `audit-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    timestamp: new Date().toISOString(),
+    action: "guideline_proposal_undone",
+    user: "Brand Manager",
+    proposalId: proposal.id,
+    targetId,
+    title: proposal.title
+  });
+
+  req.saveWs();
+
+  res.json({
+    success: true,
+    message: `Undone approval of ${targetId}. Proposal restored to pending.`,
+    proposal,
+    rules: req.workspace.rules,
+    facts: req.workspace.facts
+  });
+});
+
+app.delete("/api/guidelines/proposals", (req, res) => {
+  req.workspace.proposals = [];
+  req.workspace.lastImport = null;
+  req.saveWs();
+  res.json({ message: "Proposals review queue cleared.", proposals: [] });
 });
 
 // --- 3b. Visual Settings & Brand Palette ---

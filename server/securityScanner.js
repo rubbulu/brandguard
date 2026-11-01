@@ -9,10 +9,10 @@
  */
 
 const INJECTION_PATTERNS = [
-  /\bignore\s+(all\s+)?(previous|prior|above|system|brand)?\s*(instructions|rules|guidelines|prompts)\b/gi,
-  /\bapprove\s+(this\s+)?(draft|banner|post|copy|content)\s*(without|with no)?\s*(findings|errors|issues|violations)?\b/gi,
-  /\bapprove\s+this\s+(banner|draft)\b/gi,
-  /\bdisregard\s+(all\s+)?(rules|instructions|guidelines)\b/gi,
+  /\bignore\s+(all\s+)?(previous|prior|above|system|brand|other)?\s*(instructions|rules|guidelines|prompts)\b/gi,
+  /\bapprove\s+(this|every|all|any)?\s*(draft|banner|post|copy|content)s?\s*(without|with no)?\s*(findings|errors|issues|violations)?\b/gi,
+  /\bapprove\s+(this|every|all|any)\s+(banner|draft)s?\b/gi,
+  /\bdisregard\s+(all\s+)?(other\s+)?(rules|instructions|guidelines)\b/gi,
   /\b100%\s+compliant\b/gi,
   /\bno\s+findings\s+detected\b/gi,
   /\bbypass\s+(a[il]\s+)?(governance|validator|review|safety)\b/gi,

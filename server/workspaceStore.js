@@ -51,6 +51,8 @@ export function getInitialWorkspaceData(workspaceId) {
     visualSettings: JSON.parse(JSON.stringify(INITIAL_VISUAL_SETTINGS)),
     toneProfiles: JSON.parse(JSON.stringify(INITIAL_TONE_PROFILES)),
     brandTerms: [...INITIAL_BRAND_TERMS],
+    proposals: [],
+    auditTrail: [],
     drafts: [] // Fresh visitor starts with NO drafts, NO comments, empty audit trail
   };
 }
@@ -86,6 +88,12 @@ export function loadWorkspace(workspaceId) {
       }
       if (!Array.isArray(data.brandTerms)) {
         data.brandTerms = [...INITIAL_BRAND_TERMS];
+      }
+      if (!Array.isArray(data.proposals)) {
+        data.proposals = [];
+      }
+      if (!Array.isArray(data.auditTrail)) {
+        data.auditTrail = [];
       }
 
       return data;
