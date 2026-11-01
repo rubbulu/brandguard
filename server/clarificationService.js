@@ -13,14 +13,8 @@
  */
 
 import { detectPromptInjection } from "./securityScanner.js";
-
-export const CANDIDATE_MODELS = [
-  "gemini-2.5-flash",
-  "gemini-2.0-flash",
-  "gemini-1.5-flash",
-  "gemini-1.5-flash-8b",
-  "gemini-1.5-pro"
-];
+import { ACTIVE_MODEL, CANDIDATE_MODELS } from "./geminiService.js";
+export { ACTIVE_MODEL, CANDIDATE_MODELS };
 
 /**
  * Computes dispute statistics for a specific rule from stored drafts.
@@ -135,25 +129,75 @@ export function detectUnclearRules(workspace) {
 }
 
 /**
- * Normalizes an AI failure reason into plain, concise human-readable words.
+ * Normalizes an AI failure reason into plain, concise human-readable words:
+ * - 404 / model-not-found / auth -> "Gemini model unavailable (check GEMINI_MODEL)"
+ * - timeout -> "Gemini timed out"
+ * - rate limit / quota -> "Gemini quota/rate limit"
+ * - schema / wording validation failure -> "failed validation: <short reason>"
+ * Never shows raw JSON or API error bodies in the UI.
  */
 export function normalizeAiFailureReason(errOrReason) {
-  if (!errOrReason) return "AI suggestions unavailable";
+  if (!errOrReason) return "Gemini model unavailable (check GEMINI_MODEL)";
   let msg = typeof errOrReason === "string" ? errOrReason : errOrReason.message || "";
   msg = msg.trim();
-  if (msg.toLowerCase().includes("timed out") || msg.toLowerCase().includes("timeout") || msg.toLowerCase().includes("abort")) {
+  const lower = msg.toLowerCase();
+
+  // 1. Timeout
+  if (lower.includes("timed out") || lower.includes("timeout") || lower.includes("abort") || lower.includes("504") || lower.includes("etimedout")) {
     return "Gemini timed out";
   }
-  if (msg.includes("429") || msg.toLowerCase().includes("quota") || msg.toLowerCase().includes("rate limit") || msg.toLowerCase().includes("resource_exhausted")) {
+
+  // 2. Rate limit / quota
+  if (lower.includes("429") || lower.includes("quota") || lower.includes("rate limit") || lower.includes("resource_exhausted")) {
     return "Gemini quota/rate limit";
   }
-  if (msg.includes("GEMINI_API_KEY")) {
-    return "GEMINI_API_KEY is not configured";
+
+  // 3. 404 / model not found or auth / API key error
+  if (
+    lower.includes("404") ||
+    lower.includes("not found") ||
+    lower.includes("not_found") ||
+    lower.includes("model unavailable") ||
+    lower.includes("models/") ||
+    lower.includes("401") ||
+    lower.includes("403") ||
+    lower.includes("auth") ||
+    lower.includes("api key") ||
+    lower.includes("api_key") ||
+    lower.includes("unauthenticated") ||
+    lower.includes("permission_denied") ||
+    lower.includes("gemini_api_key")
+  ) {
+    return "Gemini model unavailable (check GEMINI_MODEL)";
   }
-  if (msg.startsWith("Gemini output failed validation:") || msg.startsWith("Gemini output failed validation")) {
-    return msg;
+
+  // 4. Real schema/wording validation failure
+  if (lower.includes("failed validation") || lower.includes("validation failed")) {
+    let short = msg.replace(/^.*?failed validation:\s*/i, "").replace(/^Gemini output failed validation:\s*/i, "").trim();
+    if (short.startsWith("{") || short.includes("{\n")) {
+      return "failed validation: AI output is not valid JSON";
+    }
+    return `failed validation: ${short}`;
   }
-  return `Gemini output failed validation: ${msg}`;
+
+  if (
+    lower.includes("does not exist in library") ||
+    lower.includes("not a valid object") ||
+    lower.includes("clarifying question") ||
+    lower.includes("valid wordings") ||
+    lower.includes("exceeds 300 characters") ||
+    lower.includes("shorter than 10 characters") ||
+    lower.includes("identical to current")
+  ) {
+    return `failed validation: ${msg.trim()}`;
+  }
+
+  // Never show raw JSON or API error bodies in the UI
+  if (msg.includes("{") || msg.includes("}") || lower.includes("returned ") || lower.includes("http")) {
+    return "Gemini model unavailable (check GEMINI_MODEL)";
+  }
+
+  return "Gemini model unavailable (check GEMINI_MODEL)";
 }
 
 /**

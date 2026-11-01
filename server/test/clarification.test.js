@@ -433,7 +433,7 @@ describe("Self-Healing Guideline Clarification (Round 3, Improvement 2)", () => 
     assert.equal(normalizedRateLimit, "Gemini quota/rate limit");
 
     const normalizedValidation = normalizeAiFailureReason("AI output is not a valid object.");
-    assert.equal(normalizedValidation, "Gemini output failed validation: AI output is not a valid object.");
+    assert.equal(normalizedValidation, "failed validation: AI output is not a valid object.");
   });
 
   // Test 11: Demo Labels ("Demo wording" and "Demo data")
@@ -620,6 +620,178 @@ describe("Self-Healing Guideline Clarification (Round 3, Improvement 2)", () => 
       "Battery lasts up to 20 hours.",
       "Fix must be derived dynamically from custom fact text in the library!"
     );
+  });
+
+  // Test 16: No 'gemini-1.5' appears in any server source file
+  test("no 'gemini-1.5' appears in any server source file", () => {
+    const serverDir = path.join(__dirname, "..");
+    const forbiddenTarget = ["gemini", "1.5"].join("-");
+    const violatingFiles = [];
+
+    function checkDir(dir) {
+      for (const item of fs.readdirSync(dir)) {
+        if (item === "data" || item === "node_modules" || item === ".git" || item === "test") continue;
+        const fullPath = path.join(dir, item);
+        const stat = fs.statSync(fullPath);
+        if (stat.isDirectory()) {
+          checkDir(fullPath);
+        } else if (item.endsWith(".js") || item.endsWith(".mjs")) {
+          const content = fs.readFileSync(fullPath, "utf-8");
+          if (content.includes(forbiddenTarget)) {
+            violatingFiles.push(path.relative(serverDir, fullPath));
+          }
+        }
+      }
+    }
+
+    checkDir(serverDir);
+    assert.deepEqual(
+      violatingFiles,
+      [],
+      `Server source files contain forbidden hardcoded model: ${violatingFiles.join(", ")}`
+    );
+  });
+
+  // Test 17: Failure reason normalization (404/auth, timeout, rate limit, schema validation)
+  test("failure reasons: 404/auth -> model unavailable; timeout -> timed out; rate limit -> quota; validation -> failed validation", () => {
+    // 404 / model not found
+    assert.equal(
+      normalizeAiFailureReason("models/gemini-unavailable is not found for API version v1beta (404)"),
+      "Gemini model unavailable (check GEMINI_MODEL)"
+    );
+    assert.equal(
+      normalizeAiFailureReason("Model returned 404"),
+      "Gemini model unavailable (check GEMINI_MODEL)"
+    );
+
+    // Auth error
+    assert.equal(
+      normalizeAiFailureReason("API_KEY_INVALID: 403 Forbidden"),
+      "Gemini model unavailable (check GEMINI_MODEL)"
+    );
+    assert.equal(
+      normalizeAiFailureReason("GEMINI_API_KEY is not configured"),
+      "Gemini model unavailable (check GEMINI_MODEL)"
+    );
+
+    // Timeout
+    assert.equal(
+      normalizeAiFailureReason("The user aborted a request: request timed out"),
+      "Gemini timed out"
+    );
+
+    // Rate limit
+    assert.equal(
+      normalizeAiFailureReason("429 RESOURCE_EXHAUSTED Quota exceeded"),
+      "Gemini quota/rate limit"
+    );
+
+    // Schema / wording validation failure
+    assert.equal(
+      normalizeAiFailureReason("failed validation: Expected 2 to 3 valid wordings"),
+      "failed validation: Expected 2 to 3 valid wordings"
+    );
+    assert.equal(
+      normalizeAiFailureReason("Rule ID R-07 does not exist in library."),
+      "failed validation: Rule ID R-07 does not exist in library."
+    );
+
+    // Never show raw JSON or API error bodies
+    assert.equal(
+      normalizeAiFailureReason('{"error": {"code": 404, "message": "raw json body"}}'),
+      "Gemini model unavailable (check GEMINI_MODEL)"
+    );
+  });
+
+  // Test 18: Flag every occurrence of term/phrase rules and position-aware replacement
+  test("flag every occurrence of term rules: 'great for kids and other kids' produces two findings, position-aware replacement replaces only accepted ones", () => {
+    const text = "great for kids and other kids";
+    const rawFindings = [
+      {
+        rule_id: "R-07",
+        quote: "kids",
+        suggested_fix: "students",
+        explanation: "Say students, not kids"
+      }
+    ];
+
+    const validationResult = validateFindings(text, rawFindings, INITIAL_RULES, INITIAL_FACTS);
+    assert.equal(validationResult.accepted.length, 2, "Must produce two findings for two occurrences of 'kids'");
+
+    const [f1, f2] = validationResult.accepted;
+    assert.equal(f1.quote, "kids");
+    assert.equal(f1.start, 10);
+    assert.equal(f1.end, 14);
+
+    assert.equal(f2.quote, "kids");
+    assert.equal(f2.start, 25);
+    assert.equal(f2.end, 29);
+
+    // Case A: Only the first accepted
+    const f1OnlyAccepted = [{ ...f1, status: "accepted" }, { ...f2, status: "rejected" }];
+    assert.equal(
+      recomputeDraftText(text, f1OnlyAccepted),
+      "great for students and other kids",
+      "Only the first occurrence must be replaced"
+    );
+
+    // Case B: Only the second accepted
+    const f2OnlyAccepted = [{ ...f1, status: "rejected" }, { ...f2, status: "accepted" }];
+    assert.equal(
+      recomputeDraftText(text, f2OnlyAccepted),
+      "great for kids and other students",
+      "Only the second occurrence must be replaced"
+    );
+
+    // Case C: Both accepted
+    const bothAccepted = [{ ...f1, status: "accepted" }, { ...f2, status: "accepted" }];
+    assert.equal(
+      recomputeDraftText(text, bothAccepted),
+      "great for students and other students",
+      "Both occurrences must be replaced"
+    );
+  });
+
+  // Test 19: Redline one-chunk replacement tagged with rule/fact ID
+  test("redline one-chunk replacement: replaces phrase as ONE struck chunk and ONE inserted chunk without word splitting", async () => {
+    const { computeRedlineChunks } = await import("../../client/src/utils/redlineUtils.js");
+
+    const originalText = "Meet CampusPro! Its battery lasts 3 days. Buy now!!";
+    const finalText = "Meet CampusPro! Battery lasts up to 12 hours. Buy now!!";
+    const findings = [
+      {
+        rule_id: "F-01",
+        quote: "Its battery lasts 3 days.",
+        suggested_fix: "Battery lasts up to 12 hours.",
+        status: "accepted"
+      }
+    ];
+
+    const chunks = computeRedlineChunks(originalText, finalText, findings);
+    assert.equal(chunks.length, 4);
+
+    assert.equal(chunks[0].value, "Meet CampusPro! ");
+    assert.equal(chunks[0].removed, undefined);
+    assert.equal(chunks[0].added, undefined);
+
+    // One struck-through chunk for removed phrase
+    assert.equal(chunks[1].removed, true);
+    assert.equal(chunks[1].value, "Its battery lasts 3 days.");
+    assert.equal(chunks[1].ruleId, "F-01");
+
+    // One inserted chunk for replacement phrase
+    assert.equal(chunks[2].added, true);
+    assert.equal(chunks[2].value, "Battery lasts up to 12 hours.");
+    assert.equal(chunks[2].ruleId, "F-01");
+
+    assert.equal(chunks[3].value, " Buy now!!");
+
+    // Ensure final text matches when assembled
+    const assembledFinal = chunks
+      .filter(c => !c.removed)
+      .map(c => c.value)
+      .join("");
+    assert.equal(assembledFinal, finalText);
   });
 
 });

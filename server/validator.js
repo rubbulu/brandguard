@@ -45,6 +45,62 @@ export function cleanSingleSentence(text) {
 }
 
 /**
+ * Finds all case-insensitive occurrences of a term or phrase in text,
+ * respecting word boundaries for word terms.
+ */
+export function findAllTermOccurrences(draftText, quote) {
+  if (!draftText || !quote) return [];
+  const occurrences = [];
+  const escaped = quote.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const isWordBoundary = /^[\w\s]+$/u.test(quote);
+  const regex = isWordBoundary
+    ? new RegExp(`\\b${escaped}\\b`, "gi")
+    : new RegExp(escaped, "gi");
+
+  let m;
+  while ((m = regex.exec(draftText)) !== null) {
+    occurrences.push({
+      start: m.index,
+      end: m.index + m[0].length,
+      quote: draftText.slice(m.index, m.index + m[0].length)
+    });
+  }
+
+  if (occurrences.length === 0) {
+    let sIdx = 0;
+    let foundIdx = -1;
+    while ((foundIdx = draftText.toLowerCase().indexOf(quote.toLowerCase(), sIdx)) !== -1) {
+      occurrences.push({
+        start: foundIdx,
+        end: foundIdx + quote.length,
+        quote: draftText.slice(foundIdx, foundIdx + quote.length)
+      });
+      sIdx = foundIdx + quote.length;
+    }
+  }
+
+  return occurrences;
+}
+
+/**
+ * Checks if a rule is a term/phrase rule (e.g. R-07 or terminology category).
+ */
+export function isTermPhraseRule(ruleId, rules = [], quote = "") {
+  if (!ruleId) return false;
+  const upper = ruleId.trim().toUpperCase();
+  if (upper === "R-07") return true;
+  const rule = (rules || []).find(r => r.id && r.id.trim().toUpperCase() === upper);
+  if (rule) {
+    if (rule.category === "terminology") return true;
+    if (/'[^']+'/.test(rule.text)) return true;
+  }
+  if (quote && quote.trim().split(/\s+/).length <= 3) {
+    return true;
+  }
+  return false;
+}
+
+/**
  * Detects obvious ungrammatical patterns resulting from applying a suggested fix to draft text.
  * Examples:
  * - Leftover comparative immediately following an adjective (e.g. "Great better grades", "Good faster")
@@ -177,35 +233,46 @@ export function mergeFindings(findings, draftText = "") {
         const exQuote = (existing.quote || "").trim().toLowerCase();
         const curQuote = (current.quote || "").trim().toLowerCase();
 
-        // Check if nested
-        const isNested = exQuote.includes(curQuote) || curQuote.includes(exQuote);
-
         // Check if overlapping spans in draftText
+        const startCur = typeof current.start === "number" ? current.start : (typeof current.startIndex === "number" ? current.startIndex : -1);
+        const endCur = typeof current.end === "number" ? current.end : (typeof current.endIndex === "number" ? current.endIndex : -1);
+        const startEx = typeof existing.start === "number" ? existing.start : (typeof existing.startIndex === "number" ? existing.startIndex : -1);
+        const endEx = typeof existing.end === "number" ? existing.end : (typeof existing.endIndex === "number" ? existing.endIndex : -1);
+
         let isOverlapping = false;
         let isSameBlock = false;
-        if (draftText) {
+
+        if (startCur >= 0 && endCur >= 0 && startEx >= 0 && endEx >= 0) {
+          // Merge or de-duplicate ONLY when it is the same rule on the same or overlapping text span
+          isOverlapping = (startEx < endCur && startCur < endEx);
+        } else if (draftText) {
           const lowerText = draftText.toLowerCase();
           const posEx = lowerText.indexOf(exQuote);
           const posCur = lowerText.indexOf(curQuote);
           if (posEx !== -1 && posCur !== -1) {
-            const endEx = posEx + exQuote.length;
-            const endCur = posCur + curQuote.length;
-            isOverlapping = (posEx < endCur && posCur < endEx);
+            const endPEx = posEx + exQuote.length;
+            const endPCur = posCur + curQuote.length;
+            isOverlapping = (posEx < endPCur && posCur < endPEx);
+          }
+        }
 
-            // For SEC-01: max one per text block/line
-            if (rId === "SEC-01") {
-              const lineStartEx = lowerText.lastIndexOf("\n", posEx);
-              const lineEndEx = lowerText.indexOf("\n", endEx);
-              const lineStartCur = lowerText.lastIndexOf("\n", posCur);
-              const lineEndCur = lowerText.indexOf("\n", endCur);
-              if (lineStartEx === lineStartCur && lineEndEx === lineEndCur) {
-                isSameBlock = true;
-              }
+        // For SEC-01: max one per text block/line
+        if (rId === "SEC-01" && draftText) {
+          const lowerText = draftText.toLowerCase();
+          const posEx = startEx >= 0 ? startEx : lowerText.indexOf(exQuote);
+          const posCur = startCur >= 0 ? startCur : lowerText.indexOf(curQuote);
+          if (posEx !== -1 && posCur !== -1) {
+            const lineStartEx = lowerText.lastIndexOf("\n", posEx);
+            const lineEndEx = lowerText.indexOf("\n", posEx);
+            const lineStartCur = lowerText.lastIndexOf("\n", posCur);
+            const lineEndCur = lowerText.indexOf("\n", posCur);
+            if (lineStartEx === lineStartCur && lineEndEx === lineEndCur) {
+              isSameBlock = true;
             }
           }
         }
 
-        if (isNested || isOverlapping || isSameBlock) {
+        if (isOverlapping || isSameBlock) {
           // Merge current into existing
           isMerged = true;
           mergedCount++;
@@ -260,16 +327,23 @@ export function areFindingsOverlapping(f1, f2, draftText) {
   const q2 = (f2.quote || "").trim().toLowerCase();
   if (!q1 || !q2) return false;
 
-  if (q1.includes(q2) || q2.includes(q1)) return true;
+  const s1 = typeof f1.start === "number" ? f1.start : (typeof f1.startIndex === "number" ? f1.startIndex : -1);
+  const e1 = typeof f1.end === "number" ? f1.end : (typeof f1.endIndex === "number" ? f1.endIndex : -1);
+  const s2 = typeof f2.start === "number" ? f2.start : (typeof f2.startIndex === "number" ? f2.startIndex : -1);
+  const e2 = typeof f2.end === "number" ? f2.end : (typeof f2.endIndex === "number" ? f2.endIndex : -1);
+
+  if (s1 >= 0 && e1 >= 0 && s2 >= 0 && e2 >= 0) {
+    return (s1 < e2 && s2 < e1);
+  }
 
   if (draftText) {
     const lower = draftText.toLowerCase();
     const p1 = lower.indexOf(q1);
     const p2 = lower.indexOf(q2);
     if (p1 !== -1 && p2 !== -1) {
-      const e1 = p1 + q1.length;
-      const e2 = p2 + q2.length;
-      return (p1 < e2 && p2 < e1);
+      const e1Pos = p1 + q1.length;
+      const e2Pos = p2 + q2.length;
+      return (p1 < e2Pos && p2 < e1Pos);
     }
   }
   return false;
@@ -815,47 +889,82 @@ export function validateFindings(
         reasons: rejectionReasons
       });
     } else {
-      // Resolve start and end character offsets in draftText
-      let startOffset = typeof finding.startIndex === "number" ? finding.startIndex : (typeof finding.start === "number" ? finding.start : -1);
-      let endOffset = typeof finding.endIndex === "number" ? finding.endIndex : (typeof finding.end === "number" ? finding.end : -1);
+      // Check if term/phrase rule (e.g. R-07 or terminology) with multiple occurrences in draftText
+      const isTermRule = isTermPhraseRule(ruleId, rules, quote);
+      const occurrences = (isTermRule && draftText && quote) ? findAllTermOccurrences(draftText, quote) : [];
 
-      if (startOffset < 0 && draftText && quote) {
-        const fromIdx = (usedQuoteIndices.get(quote) !== undefined ? usedQuoteIndices.get(quote) + 1 : 0);
-        const nextIdx = draftText.indexOf(quote, fromIdx);
-        if (nextIdx !== -1) {
-          startOffset = nextIdx;
-          endOffset = nextIdx + quote.length;
-          usedQuoteIndices.set(quote, nextIdx);
-        } else {
-          const firstIdx = draftText.indexOf(quote);
-          if (firstIdx !== -1) {
-            startOffset = firstIdx;
-            endOffset = firstIdx + quote.length;
+      if (occurrences.length > 1) {
+        // Create one finding per occurrence with its own offsets
+        for (let occIdx = 0; occIdx < occurrences.length; occIdx++) {
+          const occ = occurrences[occIdx];
+          const alreadyAdded = accepted.some(a => a.rule_id === ruleId && a.start === occ.start);
+          if (!alreadyAdded) {
+            accepted.push({
+              id: `finding-${Date.now()}-${i}-${occIdx}`,
+              quote: occ.quote,
+              rule_id: ruleId,
+              category: ruleId === "SEC-01" ? "security" : (finding.category || "claim").toLowerCase(),
+              severity: ["high", "medium", "low"].includes((finding.severity || "").toLowerCase())
+                ? finding.severity.toLowerCase()
+                : "medium",
+              explanation: cleanSingleSentence(rawExplanation),
+              suggested_fix: suggestedFix,
+              fix_rejected: fixRejected,
+              fix_rejection_reason: fixRejectionReason,
+              action: action,
+              needs_human_judgement: needsHumanJudgement,
+              status: "pending",
+              rawIndex: i,
+              start: occ.start,
+              end: occ.end,
+              startIndex: occ.start,
+              endIndex: occ.end
+            });
           }
         }
-      }
+      } else {
+        // Resolve start and end character offsets in draftText
+        let startOffset = typeof finding.startIndex === "number" ? finding.startIndex : (typeof finding.start === "number" ? finding.start : -1);
+        let endOffset = typeof finding.endIndex === "number" ? finding.endIndex : (typeof finding.end === "number" ? finding.end : -1);
 
-      accepted.push({
-        id: `finding-${Date.now()}-${i}`,
-        quote: quote,
-        rule_id: ruleId,
-        category: ruleId === "SEC-01" ? "security" : (finding.category || "claim").toLowerCase(),
-        severity: ["high", "medium", "low"].includes((finding.severity || "").toLowerCase())
-          ? finding.severity.toLowerCase()
-          : "medium",
-        explanation: cleanSingleSentence(rawExplanation),
-        suggested_fix: suggestedFix,
-        fix_rejected: fixRejected,
-        fix_rejection_reason: fixRejectionReason,
-        action: action,
-        needs_human_judgement: needsHumanJudgement,
-        status: "pending",
-        rawIndex: i,
-        start: startOffset >= 0 ? startOffset : undefined,
-        end: endOffset >= 0 ? endOffset : undefined,
-        startIndex: startOffset >= 0 ? startOffset : undefined,
-        endIndex: endOffset >= 0 ? endOffset : undefined
-      });
+        if (startOffset < 0 && draftText && quote) {
+          const fromIdx = (usedQuoteIndices.get(quote) !== undefined ? usedQuoteIndices.get(quote) + 1 : 0);
+          const nextIdx = draftText.indexOf(quote, fromIdx);
+          if (nextIdx !== -1) {
+            startOffset = nextIdx;
+            endOffset = nextIdx + quote.length;
+            usedQuoteIndices.set(quote, nextIdx);
+          } else {
+            const firstIdx = draftText.indexOf(quote);
+            if (firstIdx !== -1) {
+              startOffset = firstIdx;
+              endOffset = firstIdx + quote.length;
+            }
+          }
+        }
+
+        accepted.push({
+          id: `finding-${Date.now()}-${i}`,
+          quote: quote,
+          rule_id: ruleId,
+          category: ruleId === "SEC-01" ? "security" : (finding.category || "claim").toLowerCase(),
+          severity: ["high", "medium", "low"].includes((finding.severity || "").toLowerCase())
+            ? finding.severity.toLowerCase()
+            : "medium",
+          explanation: cleanSingleSentence(rawExplanation),
+          suggested_fix: suggestedFix,
+          fix_rejected: fixRejected,
+          fix_rejection_reason: fixRejectionReason,
+          action: action,
+          needs_human_judgement: needsHumanJudgement,
+          status: "pending",
+          rawIndex: i,
+          start: startOffset >= 0 ? startOffset : undefined,
+          end: endOffset >= 0 ? endOffset : undefined,
+          startIndex: startOffset >= 0 ? startOffset : undefined,
+          endIndex: endOffset >= 0 ? endOffset : undefined
+        });
+      }
     }
   }
 
@@ -869,13 +978,15 @@ export function validateFindings(
   const totalMergedCount = sameRuleMergedCount + crossRuleMergedCount;
   const combinedMergedList = [...sameRuleMergedList, ...crossRuleMergedList];
 
-  // 8. Deduplicate only exact identical duplicates (same rule_id, quote, and fix)
-  // Findings from different rules are NOT duplicates just because they cover the same text.
+  // 8. Deduplicate only exact identical duplicates (same rule_id, quote, and fix on the SAME span)
+  // Findings on separate spans are separate occurrences and must both be kept.
   const deduplicated = [];
   const seenExact = new Set();
 
   for (const f of crossRuleMerged) {
-    const key = `${f.rule_id}::${f.quote.toLowerCase()}::${(f.suggested_fix || "").toLowerCase()}`;
+    const startStr = typeof f.start === "number" ? f.start : "na";
+    const endStr = typeof f.end === "number" ? f.end : "na";
+    const key = `${f.rule_id}::${startStr}::${endStr}::${f.quote.toLowerCase()}::${(f.suggested_fix || "").toLowerCase()}`;
     if (seenExact.has(key)) {
       rejected.push({
         index: f.rawIndex,

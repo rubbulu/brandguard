@@ -606,7 +606,7 @@ app.get("/api/clarifications", async (req, res) => {
           suggestedWordings: questionObj.suggestedWordings || [],
           status: "pending",
           aiAvailable: Boolean(questionObj.aiAvailable),
-          aiReason: questionObj.aiAvailable ? null : (aiReason || "AI suggestions unavailable"),
+          aiReason: questionObj.aiAvailable ? null : (aiReason || "Gemini model unavailable (check GEMINI_MODEL)"),
           wordingSource: questionObj.aiAvailable ? "ai" : null,
           appliedWording: null,
           resolvedAt: null,
