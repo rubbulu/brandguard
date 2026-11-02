@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { ExpiringLRUCache } from "./lruCache.js";
 import {
   INITIAL_RULES,
   INITIAL_FACTS,
@@ -23,6 +24,21 @@ if (!fs.existsSync(WORKSPACE_IMAGES_DIR)) {
   fs.mkdirSync(WORKSPACE_IMAGES_DIR, { recursive: true });
 }
 
+// Bounded in-memory workspace cache (LRU, max 100 workspaces, 20m expiry)
+export const workspaceCache = new ExpiringLRUCache({ maxSize: 100, ttlMs: 20 * 60 * 1000 });
+
+// Per-file operation queue to serialize concurrent writes and prevent race conditions
+const fileQueues = new Map();
+
+export function enqueueFileOperation(filePath, op) {
+  const currentOp = fileQueues.get(filePath) || Promise.resolve();
+  const nextOp = currentOp
+    .catch(() => {}) // Don't let previous failures break the queue
+    .then(() => op());
+  fileQueues.set(filePath, nextOp);
+  return nextOp;
+}
+
 export function sanitizeWorkspaceId(id) {
   if (!id || typeof id !== "string") return "default";
   return id.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 64) || "default";
@@ -31,6 +47,32 @@ export function sanitizeWorkspaceId(id) {
 function getFilePath(workspaceId) {
   const safeId = sanitizeWorkspaceId(workspaceId);
   return path.join(WORKSPACES_DIR, `${safeId}.json`);
+}
+
+/**
+ * Safe atomic file write: writes content to a unique temp file in the same directory,
+ * then atomically renames it over the target file.
+ */
+export function writeFileSyncAtomic(filePath, content) {
+  const dir = path.dirname(filePath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  const tempPath = path.join(
+    dir,
+    `.${path.basename(filePath)}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`
+  );
+
+  try {
+    fs.writeFileSync(tempPath, content, "utf-8");
+    fs.renameSync(tempPath, filePath);
+  } catch (err) {
+    // If temp file remains on error, attempt cleanup
+    try {
+      if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+    } catch (_) {}
+    throw err;
+  }
 }
 
 export function getWorkspaceImagesDir(workspaceId) {
@@ -63,8 +105,15 @@ export function loadWorkspace(workspaceId) {
   const safeId = sanitizeWorkspaceId(workspaceId);
   const filePath = getFilePath(safeId);
 
+  // Return from in-memory cache if valid and unexpired
+  if (workspaceCache.has(safeId)) {
+    return workspaceCache.get(safeId);
+  }
+
+  let fileExisted = false;
   try {
     if (fs.existsSync(filePath)) {
+      fileExisted = true;
       const content = fs.readFileSync(filePath, "utf-8");
       const data = JSON.parse(content);
       // Ensure required collections exist
@@ -104,14 +153,19 @@ export function loadWorkspace(workspaceId) {
         data.dismissedClarifications = {};
       }
 
+      data._wasReset = false;
+      data._wasMissing = false;
+      workspaceCache.set(safeId, data);
       return data;
     }
   } catch (err) {
     console.warn(`[WorkspaceStore] Error reading workspace ${safeId}, re-seeding:`, err.message);
   }
 
-  // Create new seeded workspace
+  // Create new seeded workspace (file was missing or reset after disk wipe)
   const newWs = getInitialWorkspaceData(safeId);
+  newWs._wasReset = true;
+  newWs._wasMissing = !fileExisted;
   saveWorkspace(safeId, newWs);
   return newWs;
 }
@@ -121,14 +175,35 @@ export function saveWorkspace(workspaceId, data) {
   const filePath = getFilePath(safeId);
   try {
     data.updatedAt = new Date().toISOString();
-    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
+    const content = JSON.stringify(data, null, 2);
+    writeFileSyncAtomic(filePath, content);
+    workspaceCache.set(safeId, data);
   } catch (err) {
     console.error(`[WorkspaceStore] Failed to save workspace ${safeId}:`, err.message);
   }
 }
 
+/**
+ * Serialized async workspace updater that guards against race conditions
+ * by acquiring the per-file lock before read-modify-write.
+ */
+export async function updateWorkspace(workspaceId, updater) {
+  const safeId = sanitizeWorkspaceId(workspaceId);
+  const filePath = getFilePath(safeId);
+
+  return enqueueFileOperation(filePath, async () => {
+    // Invalidate in-memory cache to ensure latest state is read from disk
+    workspaceCache.delete(safeId);
+    const ws = loadWorkspace(safeId);
+    await updater(ws);
+    saveWorkspace(safeId, ws);
+    return ws;
+  });
+}
+
 export function resetWorkspace(workspaceId) {
   const safeId = sanitizeWorkspaceId(workspaceId);
+  workspaceCache.delete(safeId);
   const fresh = getInitialWorkspaceData(safeId);
   saveWorkspace(safeId, fresh);
 

@@ -242,6 +242,7 @@ export default function App() {
 
   // Insights State
   const [insights, setInsights] = useState(null);
+  const [workspaceResetNotice, setWorkspaceResetNotice] = useState(false);
 
   // Manager: Add & Edit State
   const [newRule, setNewRule] = useState({ id: "", category: "claim", text: "", severity: "high" });
@@ -344,6 +345,20 @@ export default function App() {
         wsFetch("/api/guidelines/proposals"),
         wsFetch("/api/clarifications")
       ]);
+
+      // Detect if server reset/reseeded workspace after redeploy or idle clearance
+      const wasResetHeader = rulesRes?.headers?.get("x-workspace-reset");
+      if (wasResetHeader === "1") {
+        try {
+          if (localStorage.getItem("brandguard_has_visited") === "true") {
+            setWorkspaceResetNotice(true);
+            sessionStorage.removeItem("brandguard_active_draft_id");
+          }
+        } catch (_) {}
+      }
+      try {
+        localStorage.setItem("brandguard_has_visited", "true");
+      } catch (_) {}
 
       if (rulesRes.ok) setRules(await rulesRes.json());
       if (factsRes.ok) setFacts(await factsRes.json());
@@ -1052,6 +1067,11 @@ export default function App() {
         setReviewerComment("");
         await loadWorkspaceData();
         if (decision === "approve") {
+          if (updated.certificate?.certificateId) {
+            try {
+              localStorage.setItem(`brandguard_cert_${updated.certificate.certificateId}`, JSON.stringify(updated.certificate));
+            } catch (_) {}
+          }
           setViewingCertificateDraft(updated);
           showNotice(`Draft approved for publication! Tamper-evident compliance certificate generated (${updated.certificate?.certificateId || ""}).`);
         } else {
@@ -2150,6 +2170,25 @@ export default function App() {
         <div className="bg-amber-500 text-slate-950 px-4 py-2.5 text-xs font-bold flex items-center justify-center gap-2 shadow-xs">
           <RefreshCw className="w-4 h-4 animate-spin text-slate-950" />
           <span>Waking up the server, this can take up to a minute… retrying automatically.</span>
+        </div>
+      )}
+
+      {/* Lost Workspace Reset Notice (Item 6) */}
+      {workspaceResetNotice && (
+        <div className="bg-amber-50 border-b border-amber-300 text-amber-900 px-4 py-3 flex items-center justify-between text-xs sm:text-sm font-medium z-40 shadow-xs">
+          <div className="flex items-center gap-2.5 max-w-7xl mx-auto flex-1">
+            <Info className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>
+              Your workspace was reset (this free demo server clears temporary data). A fresh workspace has been created.
+            </span>
+          </div>
+          <button
+            onClick={() => setWorkspaceResetNotice(false)}
+            className="text-amber-700 hover:text-amber-950 font-bold p-1 rounded hover:bg-amber-200/50 text-xs ml-3"
+            aria-label="Dismiss workspace reset notice"
+          >
+            ✕
+          </button>
         </div>
       )}
 

@@ -17,7 +17,8 @@ import {
   FileText,
   Sparkles,
   ArrowLeft,
-  Palette
+  Palette,
+  Download
 } from "lucide-react";
 import RedlineDiff from "./RedlineDiff";
 
@@ -88,8 +89,30 @@ export default function ComplianceCertificate({
     }
   };
 
+  // Cache certificate record in browser localStorage so it survives demo server restarts
+  useEffect(() => {
+    if (cert?.certificateId) {
+      try {
+        localStorage.setItem(`brandguard_cert_${cert.certificateId}`, JSON.stringify(cert));
+      } catch (_) {}
+    }
+  }, [cert]);
+
   const handlePrint = () => {
     window.print();
+  };
+
+  const handleDownloadJson = () => {
+    if (!cert) return;
+    const blob = new Blob([JSON.stringify(cert, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${cert.certificateId || "brandguard-certificate"}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   return (
@@ -133,6 +156,15 @@ export default function ComplianceCertificate({
               <span>Open Public /verify</span>
             </a>
           )}
+
+          <button
+            onClick={handleDownloadJson}
+            className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs sm:text-sm font-semibold px-3 py-2 rounded-lg border border-slate-700 transition"
+            title="Download self-contained signed JSON record"
+          >
+            <Download className="w-4 h-4 text-blue-400" />
+            <span>Download JSON</span>
+          </button>
 
           <button
             onClick={handlePrint}

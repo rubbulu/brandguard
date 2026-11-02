@@ -3,6 +3,8 @@ import path from "path";
 import crypto from "crypto";
 import { fileURLToPath } from "url";
 import { ACTIVE_MODEL } from "./geminiService.js";
+import { writeFileSyncAtomic } from "./workspaceStore.js";
+import { ExpiringLRUCache } from "./lruCache.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -12,8 +14,25 @@ if (!fs.existsSync(CERTIFICATES_DIR)) {
   fs.mkdirSync(CERTIFICATES_DIR, { recursive: true });
 }
 
-function getCertSecret() {
-  return process.env.CERT_SECRET || "brandguard_default_cert_secret_key_8f9d3b2a";
+// In-memory tampered certificates cache (bounded with LRU eviction, never written to disk)
+export const inMemoryTamperedCerts = new ExpiringLRUCache({ maxSize: 50, ttlMs: 15 * 60 * 1000 });
+
+const DEV_CERT_SECRET_FALLBACK = "DEV_ONLY_UNSECURE_SECRET_CHANGE_IN_PRODUCTION";
+
+export function getCertSecret() {
+  const secret = process.env.CERT_SECRET;
+  const isProd = process.env.NODE_ENV === "production";
+
+  if (!secret || !secret.trim()) {
+    if (isProd) {
+      console.error("[CRITICAL SECURITY] CERT_SECRET environment variable is missing in production. Certificate issuance is disabled.");
+      return null;
+    }
+    // Development only fallback
+    return DEV_CERT_SECRET_FALLBACK;
+  }
+
+  return secret.trim();
 }
 
 /**
@@ -269,7 +288,13 @@ export function createComplianceCertificate({
 
   const canonicalString = canonicalizeJson(canonicalPayload);
   const contentHash = crypto.createHash("sha256").update(canonicalString).digest("hex");
-  const signature = crypto.createHmac("sha256", getCertSecret()).update(canonicalString).digest("hex");
+  const certSecret = getCertSecret();
+  if (!certSecret) {
+    const err = new Error("Certificate issuance disabled: CERT_SECRET environment variable is missing in production.");
+    err.code = "CERT_SECRET_MISSING";
+    throw err;
+  }
+  const signature = crypto.createHmac("sha256", certSecret).update(canonicalString).digest("hex");
 
   const fullCertificate = {
     ...canonicalPayload,
@@ -288,16 +313,20 @@ export function createComplianceCertificate({
 
 export function saveCertificate(cert) {
   try {
-    const certPath = path.join(CERTIFICATES_DIR, `${cert.certificateId}.json`);
-    fs.writeFileSync(certPath, JSON.stringify(cert, null, 2), "utf-8");
+    const safeId = cert.certificateId.replace(/[^a-zA-Z0-9_-]/g, "");
+    const certPath = path.join(CERTIFICATES_DIR, `${safeId}.json`);
+    writeFileSyncAtomic(certPath, JSON.stringify(cert, null, 2));
   } catch (err) {
     console.error(`[CertificateService] Failed to save certificate ${cert.certificateId}:`, err.message);
   }
 }
 
-export function getCertificateById(certificateId) {
+export function getCertificateById(certificateId, { ignoreMemory = false } = {}) {
   try {
     const safeId = certificateId.replace(/[^a-zA-Z0-9_-]/g, "");
+    if (!ignoreMemory && inMemoryTamperedCerts.has(safeId)) {
+      return inMemoryTamperedCerts.get(safeId);
+    }
     const certPath = path.join(CERTIFICATES_DIR, `${safeId}.json`);
     if (fs.existsSync(certPath)) {
       return JSON.parse(fs.readFileSync(certPath, "utf-8"));
@@ -317,6 +346,16 @@ export function verifyCertificateIntegrity(cert) {
       verified: false,
       status: "NOT_VERIFIED",
       reason: "Malformed certificate: missing ID or signature."
+    };
+  }
+
+  const certSecret = getCertSecret();
+  if (!certSecret) {
+    return {
+      verified: false,
+      status: "NOT_VERIFIED",
+      reason: "Certificate verification disabled: CERT_SECRET is missing in production.",
+      certificate: cert
     };
   }
 
@@ -347,7 +386,7 @@ export function verifyCertificateIntegrity(cert) {
 
   const recomputedCanonical = canonicalizeJson(canonicalPayload);
   const recomputedHash = crypto.createHash("sha256").update(recomputedCanonical).digest("hex");
-  const recomputedSignature = crypto.createHmac("sha256", getCertSecret()).update(recomputedCanonical).digest("hex");
+  const recomputedSignature = crypto.createHmac("sha256", certSecret).update(recomputedCanonical).digest("hex");
 
   const hashMatches = recomputedHash === cert.contentHash;
   const signatureMatches = recomputedSignature === cert.signature;
@@ -396,41 +435,36 @@ export function verifyCertificateIntegrity(cert) {
 }
 
 /**
- * Tamper test helper: Modifies one character of the stored certificate's finalText
+ * Tamper test helper: Modifies one character on an in-memory copy only.
+ * The stored certificate on disk is NEVER modified!
  */
 export function tamperWithCertificate(certificateId) {
-  const cert = getCertificateById(certificateId);
+  const safeId = certificateId.replace(/[^a-zA-Z0-9_-]/g, "");
+  const cert = getCertificateById(safeId, { ignoreMemory: true });
   if (!cert) return null;
 
-  if (!cert._originalFinalText) {
-    cert._originalFinalText = cert.finalText;
-  }
+  // Create deep clone in-memory
+  const copy = JSON.parse(JSON.stringify(cert));
 
-  // Alter exactly one character
-  if (cert.finalText.endsWith("!")) {
-    cert.finalText = cert.finalText.slice(0, -1) + "?";
+  // Alter exactly one character or append tampered marker in memory
+  if (copy.finalText && copy.finalText.endsWith("!")) {
+    copy.finalText = copy.finalText.slice(0, -1) + "?";
   } else {
-    cert.finalText = cert.finalText + " [TAMPERED]";
+    copy.finalText = (copy.finalText || "") + " [TAMPERED]";
   }
-  cert.isTampered = true;
+  copy.isTampered = true;
 
-  saveCertificate(cert);
-  return cert;
+  // Store only in in-memory LRU cache; NEVER write to disk!
+  inMemoryTamperedCerts.set(safeId, copy);
+  return copy;
 }
 
 /**
- * Restores tampered certificate back to its original approved text
+ * Restores tampered certificate back to original approved record.
+ * Simply evicts the in-memory tampered copy; disk record was untouched.
  */
 export function restoreCertificate(certificateId) {
-  const cert = getCertificateById(certificateId);
-  if (!cert) return null;
-
-  if (cert._originalFinalText) {
-    cert.finalText = cert._originalFinalText;
-    delete cert._originalFinalText;
-  }
-  cert.isTampered = false;
-
-  saveCertificate(cert);
-  return cert;
+  const safeId = certificateId.replace(/[^a-zA-Z0-9_-]/g, "");
+  inMemoryTamperedCerts.delete(safeId);
+  return getCertificateById(safeId, { ignoreMemory: true });
 }

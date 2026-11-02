@@ -23,10 +23,12 @@ import {
   recomputeDraftText,
   createComplianceCertificate,
   getCertificateById,
+  saveCertificate,
   verifyCertificateIntegrity,
   tamperWithCertificate,
   restoreCertificate
 } from "./certificateService.js";
+import { ExpiringLRUCache } from "./lruCache.js";
 
 export { tidySpacingAndPunctuation, isCopyRule, recomputeDraftText };
 import {
@@ -79,8 +81,8 @@ app.use(express.static(clientPublic));
 const workspaceImagesDir = path.join(__dirname, "data", "workspaces", "images");
 app.use("/api/workspaces/images", express.static(workspaceImagesDir));
 
-// --- Rate Limiting per Workspace (10 reviews per minute) ---
-const reviewRateLimits = new Map(); // workspaceId -> array of timestamps
+// --- Rate Limiting per Workspace (bounded LRU cache, 200 entries, 5m TTL) ---
+const reviewRateLimits = new ExpiringLRUCache({ maxSize: 200, ttlMs: 5 * 60 * 1000 });
 
 function checkRateLimit(workspaceId) {
   const now = Date.now();
@@ -102,12 +104,26 @@ const workspaceMiddleware = (req, res, next) => {
   req.workspaceId = typeof workspaceId === "string" ? workspaceId : "default";
   req.workspace = loadWorkspace(req.workspaceId);
   req.saveWs = () => saveWorkspace(req.workspaceId, req.workspace);
+  if (req.workspace._wasReset) {
+    res.setHeader("X-Workspace-Reset", "1");
+  } else {
+    res.setHeader("X-Workspace-Reset", "0");
+  }
   next();
 };
 
 app.use("/api", workspaceMiddleware);
 app.use("/visual-review", workspaceMiddleware);
 app.use("/visual-settings", workspaceMiddleware);
+
+app.get("/api/workspace/status", (req, res) => {
+  res.json({
+    workspaceId: req.workspaceId,
+    wasReset: Boolean(req.workspace._wasReset),
+    wasMissing: Boolean(req.workspace._wasMissing),
+    createdAt: req.workspace.createdAt
+  });
+});
 
 // --- 1. Health Check & Config ---
 app.get(["/api/health", "/health"], (req, res) => {
@@ -1462,12 +1478,22 @@ app.post("/api/drafts/:id/decision", (req, res) => {
     const noteSnippet = comment ? ` with note: "${comment.trim()}"` : "";
 
     // Generate cryptographic compliance certificate
-    const certificate = createComplianceCertificate({
-      draft,
-      workspace: req.workspace,
-      reviewerName: author,
-      reviewerNote: comment
-    });
+    let certificate;
+    try {
+      certificate = createComplianceCertificate({
+        draft,
+        workspace: req.workspace,
+        reviewerName: author,
+        reviewerNote: comment
+      });
+    } catch (err) {
+      if (err.code === "CERT_SECRET_MISSING") {
+        return res.status(503).json({
+          error: "Certificate issuance is disabled because CERT_SECRET is not configured on this production server. Please configure CERT_SECRET."
+        });
+      }
+      throw err;
+    }
 
     draft.certificate = certificate;
     if (!Array.isArray(draft.certificates)) {
@@ -1648,7 +1674,9 @@ app.get(["/api/verify/:certificateId", "/verify/:certificateId"], (req, res) => 
     return res.status(404).json({
       verified: false,
       status: "NOT_FOUND",
-      error: `Certificate "${certificateId}" not found in server registry.`
+      notFound: true,
+      error: "This record is no longer stored on this server. Certificates are tamper-evident and signed by the server, but the free demo disk resets. Re-issue or paste the certificate file.",
+      message: "This record is no longer stored on this server. Certificates are tamper-evident and signed by the server, but the free demo disk resets. Re-issue or paste the certificate file."
     });
   }
 
@@ -1656,10 +1684,31 @@ app.get(["/api/verify/:certificateId", "/verify/:certificateId"], (req, res) => 
   res.json(verification);
 });
 
+// Self-contained verification: verify uploaded or pasted certificate file
+app.post("/api/verify", (req, res) => {
+  const { certificate } = req.body;
+  if (!certificate || typeof certificate !== "object" || !certificate.certificateId) {
+    return res.status(400).json({
+      verified: false,
+      status: "BAD_REQUEST",
+      error: "Valid certificate object is required for verification."
+    });
+  }
+
+  const verification = verifyCertificateIntegrity(certificate);
+  if (verification.verified) {
+    // Persist verified certificate record to disk so GET finds it
+    saveCertificate(certificate);
+  }
+  res.json(verification);
+});
+
 app.get("/api/certificates/:certificateId", (req, res) => {
   const { certificateId } = req.params;
   const cert = getCertificateById(certificateId);
-  if (!cert) return res.status(404).json({ error: "Certificate not found." });
+  if (!cert) return res.status(404).json({
+    error: "This record is no longer stored on this server. Certificates are tamper-evident and signed by the server, but the free demo disk resets. Re-issue or paste the certificate file."
+  });
   res.json(cert);
 });
 

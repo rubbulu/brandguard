@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node index.js",
     "dev": "node --watch index.js",
-    "test": "node --test test/toneProfiles.test.js test/guidelineImport.test.js test/clarification.test.js test/fixesAndCertificates.test.js"
+    "test": "node --test test/toneProfiles.test.js test/guidelineImport.test.js test/clarification.test.js test/fixesAndCertificates.test.js test/storageReliability.test.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

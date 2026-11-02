@@ -532,9 +532,10 @@ function parseVisionOutput(rawText) {
 }
 
 import crypto from "crypto";
+import { ExpiringLRUCache } from "./lruCache.js";
 
-// --- In-Memory Cache (SHA-256) ---
-const visualAuditCache = new Map();
+// --- In-Memory Cache (SHA-256 with 50-entry max capacity and 30m TTL) ---
+export const visualAuditCache = new ExpiringLRUCache({ maxSize: 50, ttlMs: 30 * 60 * 1000 });
 
 export function clearVisualAuditCache() {
   visualAuditCache.clear();
