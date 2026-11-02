@@ -30,7 +30,8 @@ import {
   Eye,
   Upload,
   Trash2,
-  Sliders
+  Sliders,
+  KeyRound
 } from "lucide-react";
 import RedlineDiff from "./components/RedlineDiff";
 import ComplianceCertificate from "./components/ComplianceCertificate";
@@ -47,8 +48,44 @@ function getOrCreateWorkspaceId() {
   return id;
 }
 
+// Plain demo account credentials (no real auth, no passwords stored, never logged)
+export const DEMO_ACCOUNTS = [
+  {
+    role: "manager",
+    name: "Brand Manager",
+    email: "manager@demo",
+    password: "demo",
+    description: "Manage rules, approved facts, channel tone profiles, and import guidelines"
+  },
+  {
+    role: "creator",
+    name: "Content Creator",
+    email: "creator@demo",
+    password: "demo",
+    description: "Create drafts, check compliance, review redlines, and accept fixes"
+  },
+  {
+    role: "reviewer",
+    name: "Reviewer",
+    email: "reviewer@demo",
+    password: "demo",
+    description: "Audit decisions, verify prompt defense, and approve publication"
+  }
+];
+
+export const DEMO_DISCLAIMER_TEXT = "Demo accounts only. There is no real authentication or registration. Please do not enter personal data.";
+
 export default function App() {
   const [workspaceId] = useState(getOrCreateWorkspaceId);
+
+  // Demo user indicator
+  const [currentDemoUser, setCurrentDemoUser] = useState(() => {
+    try {
+      return sessionStorage.getItem("brandguard_demo_user") || "manager@demo";
+    } catch (_) {
+      return "manager@demo";
+    }
+  });
 
   // Role / Hash Routing: '#/manager' | '#/creator' | '#/reviewer' | '#/insights'
   const [activeRole, setActiveRole] = useState(() => {
@@ -60,6 +97,19 @@ export default function App() {
   const changeRole = (role) => {
     setActiveRole(role);
     window.location.hash = `#/${role}`;
+    if (role === "manager") setCurrentDemoUser("manager@demo");
+    else if (role === "creator") setCurrentDemoUser("creator@demo");
+    else if (role === "reviewer") setCurrentDemoUser("reviewer@demo");
+    else setCurrentDemoUser(null);
+  };
+
+  const handleDemoSignIn = (role, email) => {
+    setCurrentDemoUser(email);
+    try {
+      sessionStorage.setItem("brandguard_demo_user", email);
+    } catch (_) {}
+    changeRole(role);
+    setShowGuideModal(false);
   };
 
   // Certificate & Verification State
@@ -2210,6 +2260,11 @@ export default function App() {
           {/* Viewing As Role Navigation (#/manager, #/creator, #/reviewer, #/insights) */}
           <div className="flex items-center gap-2">
             <span className="text-xs font-semibold text-slate-500 hidden md:inline">Viewing as:</span>
+            {currentDemoUser && (
+              <span className="text-[11px] font-mono text-blue-700 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-md hidden xl:inline" title="Active demo identity">
+                {currentDemoUser}
+              </span>
+            )}
             <nav className="bg-slate-100 p-1 rounded-xl flex items-center gap-1 border border-slate-200" aria-label="Role Switcher">
               <button
                 onClick={() => changeRole("manager")}
@@ -5907,7 +5962,7 @@ export default function App() {
         )}
       </main>
 
-      {/* Accessible 4-Step Guide Modal (Closes on Esc, outside click, close button) */}
+      {/* Accessible Demo Access & 4-Step Guide Modal (Closes on Esc, outside click, close button) */}
       {showGuideModal && (
         <div
           role="dialog"
@@ -5922,13 +5977,13 @@ export default function App() {
               if (e.key === "Escape") handleCloseGuideModal();
             }}
             tabIndex={-1}
-            className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-xl border border-slate-200 space-y-5 focus:outline-none"
+            className="bg-white rounded-2xl max-w-xl w-full p-6 shadow-xl border border-slate-200 space-y-4 focus:outline-none"
           >
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <div className="flex items-center gap-2">
                 <Shield className="w-5 h-5 text-blue-600" />
                 <h3 id="guide-modal-title" className="font-extrabold text-slate-900 text-lg">
-                  Try BrandGuard in 4 Steps
+                  BrandGuard Demo Access &amp; Quick Guide
                 </h3>
               </div>
               <button
@@ -5941,64 +5996,122 @@ export default function App() {
               </button>
             </div>
 
-            <ol className="space-y-3.5 text-xs text-slate-700">
-              <li className="flex items-start gap-3">
-                <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 font-bold flex items-center justify-center shrink-0 text-xs">
-                  1
+            {/* Demo Access Panel (Prompt 6c) */}
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
+                  <KeyRound className="w-3.5 h-3.5 text-blue-600" /> Demo Access Accounts
                 </span>
-                <div>
-                  <strong className="text-slate-900 block text-sm">Brand Manager:</strong>
-                  Review active brand rules (e.g. R-12 superlatives) and approved benchmark facts.
-                </div>
-              </li>
-              <li className="flex items-start gap-3">
-                <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 font-bold flex items-center justify-center shrink-0 text-xs">
-                  2
+                <span className="text-xs font-mono text-slate-600 bg-white border border-slate-200 px-2 py-0.5 rounded shadow-2xs">
+                  Shared demo password: <strong className="text-slate-900">demo</strong>
                 </span>
-                <div>
-                  <strong className="text-slate-900 block text-sm">Content Creator:</strong>
-                  Pick the CampusPro draft from the dropdown and click <em>Run BrandGuard AI Check</em>.
-                </div>
-              </li>
-              <li className="flex items-start gap-3">
-                <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 font-bold flex items-center justify-center shrink-0 text-xs">
-                  3
-                </span>
-                <div>
-                  <strong className="text-slate-900 block text-sm">Human Decision:</strong>
-                  Accept, edit, or reject each suggestion (with undo support), then submit to reviewer.
-                </div>
-              </li>
-              <li className="flex items-start gap-3">
-                <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 font-bold flex items-center justify-center shrink-0 text-xs">
-                  4
-                </span>
-                <div>
-                  <strong className="text-slate-900 block text-sm">Reviewer & Insights:</strong>
-                  Add a review note and Approve; open Insights to see live analytics and validator statistics.
-                </div>
-              </li>
-            </ol>
+              </div>
 
-            <div className="pt-3 border-t border-slate-100 flex items-center justify-end gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                {DEMO_ACCOUNTS.map((acc) => (
+                  <div
+                    key={acc.role}
+                    className="bg-white p-3 rounded-xl border border-slate-200 flex flex-col justify-between shadow-2xs hover:border-blue-300 transition"
+                  >
+                    <div>
+                      <div className="font-bold text-xs text-slate-900 flex items-center gap-1.5">
+                        {acc.role === "manager" && <BookOpen className="w-3.5 h-3.5 text-blue-600" />}
+                        {acc.role === "creator" && <Edit3 className="w-3.5 h-3.5 text-purple-600" />}
+                        {acc.role === "reviewer" && <UserCheck className="w-3.5 h-3.5 text-emerald-600" />}
+                        <span>{acc.name}</span>
+                      </div>
+                      <div className="text-[11px] font-mono text-blue-600 truncate mt-1" title={acc.email}>
+                        {acc.email}
+                      </div>
+                      <div className="text-[10px] text-slate-500 mt-1 line-clamp-2 leading-tight">
+                        {acc.description}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleDemoSignIn(acc.role, acc.email)}
+                      className="mt-3 w-full py-1.5 px-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition shadow-xs flex items-center justify-center gap-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <span>Sign in as {acc.name}</span>
+                      <ArrowRight className="w-3 h-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              {/* Mandatory Demo Accounts Disclaimer */}
+              <p className="text-[11px] text-slate-500 italic text-center pt-1">
+                Demo accounts only. There is no real authentication or registration. Please do not enter personal data.
+              </p>
+            </div>
+
+            {/* Quick 4 Steps Guide */}
+            <div className="pt-1">
+              <h4 className="text-xs font-bold text-slate-700 mb-2 uppercase tracking-wider">
+                How BrandGuard Works (4 Steps)
+              </h4>
+              <ol className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-slate-600">
+                <li className="p-2.5 bg-slate-50 rounded-lg border border-slate-100 flex items-start gap-2">
+                  <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-700 font-bold flex items-center justify-center shrink-0 text-[10px]">1</span>
+                  <div>
+                    <strong className="text-slate-800 block text-[11px]">Brand Manager:</strong>
+                    Review rules, facts &amp; channel tone profiles.
+                  </div>
+                </li>
+                <li className="p-2.5 bg-slate-50 rounded-lg border border-slate-100 flex items-start gap-2">
+                  <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-700 font-bold flex items-center justify-center shrink-0 text-[10px]">2</span>
+                  <div>
+                    <strong className="text-slate-800 block text-[11px]">Content Creator:</strong>
+                    Run AI compliance check on copy or banners.
+                  </div>
+                </li>
+                <li className="p-2.5 bg-slate-50 rounded-lg border border-slate-100 flex items-start gap-2">
+                  <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-700 font-bold flex items-center justify-center shrink-0 text-[10px]">3</span>
+                  <div>
+                    <strong className="text-slate-800 block text-[11px]">Decision &amp; Redline:</strong>
+                    Accept, edit, or remove findings with live preview.
+                  </div>
+                </li>
+                <li className="p-2.5 bg-slate-50 rounded-lg border border-slate-100 flex items-start gap-2">
+                  <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-700 font-bold flex items-center justify-center shrink-0 text-[10px]">4</span>
+                  <div>
+                    <strong className="text-slate-800 block text-[11px]">Review &amp; Sign:</strong>
+                    Approve and issue signed compliance certificate.
+                  </div>
+                </li>
+              </ol>
+            </div>
+
+            {/* Modal Footer with "Skip, no login needed" */}
+            <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
               <button
                 type="button"
                 onClick={handleCloseGuideModal}
-                className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-300"
+                className="text-xs text-slate-500 hover:text-slate-800 underline font-semibold focus:outline-none"
               >
-                Close
+                Skip, no login needed
               </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setShowGuideModal(false);
-                  handleLoadDemoScenario(false);
-                }}
-                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
-              >
-                <span>Start the tour</span>
-                <ArrowRight className="w-3.5 h-3.5" />
-              </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleCloseGuideModal}
+                  className="px-3.5 py-1.5 rounded-xl text-xs font-semibold text-slate-600 hover:text-slate-900 border border-slate-200 hover:bg-slate-50"
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleCloseGuideModal();
+                    handleLoadDemoScenario(false);
+                  }}
+                  className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold flex items-center gap-1 shadow-xs"
+                >
+                  <span>Start the tour</span>
+                  <ArrowRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
             </div>
           </div>
         </div>
