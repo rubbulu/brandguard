@@ -6,6 +6,9 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { Readable } from "stream";
 import { EventEmitter } from "events";
+import { createRequire } from "module";
+
+const require = createRequire(import.meta.url);
 import {
   tidySpacingAndPunctuation,
   isCopyRule,
@@ -1402,6 +1405,262 @@ describe("Round 3: Removal, Security, Design Fixes & Certificate Verification", 
     // UI must render 'Kept (override):' for rejected removals
     assert.ok(appCode.includes("Kept (override):"), "App.jsx must render 'Kept (override):' for rejected removals");
     assert.ok(appCode.includes("Removed"), "App.jsx must render 'Removed' for accepted removals");
+  });
+
+  // Test 30: smoke/render test for verify page: valid, tampered, missing, and Download JSON click without error screen
+  test("smoke/render test for verify page: valid, tampered, missing, and Download JSON click without error screen", () => {
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = path.dirname(__filename);
+    const clientNodeModules = path.resolve(__dirname, "../../client/node_modules");
+    const esbuild = require(path.join(clientNodeModules, "esbuild"));
+    const React = require(path.join(clientNodeModules, "react"));
+    const ReactDOMServer = require(path.join(clientNodeModules, "react-dom/server.node.js"));
+
+    // Set up mock browser globals
+    let downloadedFile = null;
+    const origWindow = global.window;
+    const origDocument = global.document;
+    const origLocalStorage = global.localStorage;
+    const origSessionStorage = global.sessionStorage;
+    const origURL = global.URL;
+
+    global.window = { location: { pathname: "/verify/cert_test_123", hash: "" } };
+    global.localStorage = { getItem: () => null, setItem: () => {} };
+    global.sessionStorage = { getItem: () => null, setItem: () => {}, clear: () => {} };
+    global.URL = {
+      createObjectURL: () => "blob:mock-url",
+      revokeObjectURL: () => {}
+    };
+    global.document = {
+      createElement: (tag) => ({
+        tag,
+        click: function() {
+          downloadedFile = { download: this.download, href: this.href };
+        }
+      }),
+      body: {
+        appendChild: () => {},
+        removeChild: () => {}
+      }
+    };
+
+    try {
+      const verifyPagePath = path.resolve(__dirname, "../../client/src/components/PublicVerifyPage.jsx");
+      const code = fs.readFileSync(verifyPagePath, "utf-8");
+      const transpiled = esbuild.transformSync(code, { loader: "jsx", format: "cjs" });
+
+      function getComponentWithState(customStates) {
+        let callCount = 0;
+        const mockReact = {
+          ...React,
+          useState: (initial) => {
+            const idx = callCount++;
+            const val = (idx in customStates) ? customStates[idx] : initial;
+            return [val, () => {}];
+          },
+          useEffect: () => {}
+        };
+
+        const moduleObj = { exports: {} };
+        const fn = new Function("require", "module", "exports", "React", transpiled.code);
+        fn((id) => {
+          if (id === "react") return mockReact;
+          if (id === "lucide-react") {
+            return new Proxy({}, {
+              get: (target, prop) => (props) => React.createElement("svg", { "data-icon": prop, ...props })
+            });
+          }
+          return require(id);
+        }, moduleObj, moduleObj.exports, mockReact);
+
+        return {
+          Component: moduleObj.exports.default,
+          resetCallCount: () => { callCount = 0; }
+        };
+      }
+
+      // Case 1: Valid Certificate
+      const validCert = {
+        certificateId: "cert_valid_smoke",
+        title: "Smoke Test Draft",
+        version: 1,
+        channel: "Social Media / Twitter",
+        approvedAt: new Date().toISOString(),
+        reviewerLabel: "reviewer@demo",
+        status: "Compliant",
+        finalText: "CampusPro is great for universities.",
+        finalTextHash: "123456abcdef",
+        signature: "hmac_valid_smoke"
+      };
+      const { Component: CompValid } = getComponentWithState({
+        0: { verified: true, certificate: validCert, message: "Integrity Verification Succeeded" },
+        1: false,
+        2: null,
+        3: null
+      });
+      const validHtml = ReactDOMServer.renderToString(React.createElement(CompValid, { certificateId: "cert_valid_smoke" }));
+      assert.ok(validHtml.includes("VERIFIED"), "Valid cert must display VERIFIED verdict");
+      assert.ok(validHtml.includes("cert_valid_smoke"), "Must display certificate ID");
+      assert.ok(validHtml.includes("Download Certificate JSON"), "Must render Download JSON button");
+      assert.ok(!validHtml.includes("BrandGuard Interface Recovered"), "Must never show error screen for valid cert");
+
+      // Case 2: Tampered Certificate
+      const tamperedCert = {
+        ...validCert,
+        certificateId: "cert_tampered_smoke",
+        isTampered: true
+      };
+      const { Component: CompTampered } = getComponentWithState({
+        0: { verified: false, certificate: tamperedCert, reason: "SHA-256 payload digest mismatch (content was altered after approval)." },
+        1: false,
+        2: null,
+        3: null
+      });
+      const tamperedHtml = ReactDOMServer.renderToString(React.createElement(CompTampered, { certificateId: "cert_tampered_smoke" }));
+      assert.ok(tamperedHtml.includes("NOT VERIFIED"), "Tampered cert must display NOT VERIFIED verdict");
+      assert.ok(tamperedHtml.includes("Tamper Detected"), "Tampered cert must show Tamper Detected badge");
+      assert.ok(tamperedHtml.includes("SHA-256 payload digest mismatch"), "Must show tamper reason");
+      assert.ok(tamperedHtml.includes("Download Certificate JSON"), "Must render Download JSON button");
+      assert.ok(!tamperedHtml.includes("BrandGuard Interface Recovered"), "Must never show error screen for tampered cert");
+
+      // Case 3: Missing Certificate
+      const notFoundMessage = "This record is no longer stored on this server. Certificates are tamper-evident and signed by the server, but the free demo disk resets. Re-issue or paste the certificate file.";
+      const { Component: CompMissing } = getComponentWithState({
+        0: null,
+        1: false,
+        2: null,
+        3: notFoundMessage
+      });
+      const missingHtml = ReactDOMServer.renderToString(React.createElement(CompMissing, { certificateId: "cert_missing_smoke" }));
+      assert.ok(missingHtml.includes("Certificate Record Not Stored on Disk"), "Must display friendly not-stored header");
+      assert.ok(missingHtml.includes("This record is no longer stored on this server"), "Must display friendly message");
+      assert.ok(missingHtml.includes("Verify Offline or Exported Certificate Record"), "Must show paste/upload box");
+      assert.ok(!missingHtml.includes("BrandGuard Interface Recovered"), "Must never show error screen for missing cert");
+
+      // Case 4: Download JSON Click
+      downloadedFile = null;
+      const { Component: CompClick, resetCallCount } = getComponentWithState({
+        0: { verified: true, certificate: validCert, message: "Integrity Verification Succeeded" },
+        1: false,
+        2: null,
+        3: null
+      });
+      resetCallCount();
+      const validElement = CompClick({ certificateId: "cert_valid_smoke" });
+
+      function findDownloadButton(elem) {
+        if (!elem || typeof elem !== "object") return null;
+        if (elem.props?.title === "Download full signed certificate JSON record") return elem;
+        if (elem.props?.children) {
+          const children = Array.isArray(elem.props.children) ? elem.props.children : [elem.props.children];
+          for (const child of children) {
+            const found = findDownloadButton(child);
+            if (found) return found;
+          }
+        }
+        return null;
+      }
+
+      const btn = findDownloadButton(validElement);
+      assert.ok(btn, "Download JSON button must exist in element tree");
+      assert.equal(typeof btn.props.onClick, "function", "Download JSON button must have onClick handler");
+      btn.props.onClick();
+      assert.ok(downloadedFile, "Download click must trigger file download");
+      assert.equal(downloadedFile.download, "cert_valid_smoke.json", "Downloaded file must be ${certificateId}.json");
+    } finally {
+      global.window = origWindow;
+      global.document = origDocument;
+      global.localStorage = origLocalStorage;
+      global.sessionStorage = origSessionStorage;
+      global.URL = origURL;
+    }
+  });
+
+  // Test 31: ESLint no-undef equivalent AST scan across all client components
+  test("client build/AST verification: zero undefined references or TDZ errors across all client components", () => {
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = path.dirname(__filename);
+    const clientNodeModules = path.resolve(__dirname, "../../client/node_modules");
+    const parser = require(path.join(clientNodeModules, "@babel/parser"));
+    const traverse = require(path.join(clientNodeModules, "@babel/traverse")).default;
+
+    const standardGlobals = new Set([
+      "window", "document", "navigator", "location", "history", "localStorage", "sessionStorage",
+      "console", "fetch", "setTimeout", "clearTimeout", "setInterval", "clearInterval",
+      "FileReader", "Blob", "URL", "Error", "JSON", "Math", "Date", "Array", "Object",
+      "String", "Boolean", "Number", "RegExp", "Promise", "Set", "Map", "Intl",
+      "alert", "prompt", "confirm", "crypto", "btoa", "atob", "parseInt", "parseFloat",
+      "isNaN", "isFinite", "encodeURIComponent", "decodeURIComponent", "React",
+      "undefined", "NaN", "Infinity", "requestAnimationFrame", "cancelAnimationFrame",
+      "process", "global", "globalThis", "Event", "CustomEvent", "FormData", "Headers", "Request", "Response",
+      "AbortController", "TextDecoder", "TextEncoder",
+      "Uint8Array", "Int8Array", "Uint16Array", "Int16Array", "Uint32Array", "Int32Array", "Float32Array", "Float64Array"
+    ]);
+
+    const files = [
+      "client/src/App.jsx",
+      "client/src/main.jsx",
+      "client/src/components/ComplianceCertificate.jsx",
+      "client/src/components/ErrorBoundary.jsx",
+      "client/src/components/PublicVerifyPage.jsx",
+      "client/src/components/RedlineDiff.jsx",
+      "client/src/utils/redlineUtils.js"
+    ];
+
+    const issues = [];
+
+    for (const relPath of files) {
+      const fullPath = path.resolve(__dirname, "../../", relPath);
+      const code = fs.readFileSync(fullPath, "utf-8");
+      const ast = parser.parse(code, {
+        sourceType: "module",
+        plugins: ["jsx"]
+      });
+
+      traverse(ast, {
+        ReferencedIdentifier(p) {
+          const name = p.node.name;
+          const binding = p.scope.getBinding(name);
+
+          if (!binding) {
+            if (!standardGlobals.has(name)) {
+              issues.push({
+                file: relPath,
+                type: "UNDEFINED",
+                name,
+                line: p.node.loc?.start.line
+              });
+            }
+          } else {
+            if (binding.kind === "let" || binding.kind === "const") {
+              const bindingLine = binding.identifier.loc?.start.line;
+              const refLine = p.node.loc?.start.line;
+
+              let insideInnerFunction = false;
+              let curr = p.parentPath;
+              while (curr && curr.scope !== binding.scope) {
+                if (curr.isFunction()) {
+                  insideInnerFunction = true;
+                  break;
+                }
+                curr = curr.parentPath;
+              }
+
+              if (!insideInnerFunction && refLine < bindingLine) {
+                issues.push({
+                  file: relPath,
+                  type: "TDZ_ACCESS_BEFORE_INITIALIZATION",
+                  name,
+                  line: refLine
+                });
+              }
+            }
+          }
+        }
+      });
+    }
+
+    assert.equal(issues.length, 0, `Expected 0 undefined or TDZ references across client, found: ${JSON.stringify(issues)}`);
   });
 
 });

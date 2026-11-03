@@ -30,6 +30,25 @@ export default function PublicVerifyPage({ certificateId, onBack }) {
   const [pasteError, setPasteError] = useState("");
   const [isVerifyingPasted, setIsVerifyingPasted] = useState(false);
 
+  const cert = data?.certificate;
+  const isVerified = data?.verified === true;
+  const isOverride = cert?.status === "Issued with override" || Boolean(cert?.securityOverride);
+
+  const handleDownloadJson = () => {
+    const certToDownload = cert || data?.certificate;
+    if (!certToDownload) return;
+    const downloadId = certificateId || certToDownload.certificateId || "certificate";
+    const blob = new Blob([JSON.stringify(certToDownload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${downloadId}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   const verifyCertPayload = async (certObj) => {
     setIsVerifyingPasted(true);
     setPasteError("");
@@ -330,10 +349,6 @@ export default function PublicVerifyPage({ certificateId, onBack }) {
     );
   }
 
-  const cert = data?.certificate;
-  const isVerified = data?.verified === true;
-  const isOverride = cert?.status === "Issued with override" || Boolean(cert?.securityOverride);
-
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200 py-10 px-4 sm:px-6">
       <div className="max-w-3xl mx-auto space-y-6">
@@ -410,12 +425,12 @@ export default function PublicVerifyPage({ certificateId, onBack }) {
                     className={`text-xs px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider ${
                       !isVerified
                         ? "bg-red-500/20 text-red-300 border border-red-500/30"
-                        : isOverride || cert.status === "Reviewed by code checks only"
+                        : isOverride || cert?.status === "Reviewed by code checks only"
                         ? "bg-amber-500/20 text-amber-300 border border-amber-500/30"
                         : "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
                     }`}
                   >
-                    {!isVerified ? "Tamper Detected" : (isOverride ? "Issued with override" : (cert.status || "Compliant"))}
+                    {!isVerified ? "Tamper Detected" : (isOverride ? "Issued with override" : (cert?.status || "Compliant"))}
                   </span>
                 </div>
                 <p className="text-xs text-slate-400 mt-1">
@@ -442,7 +457,7 @@ export default function PublicVerifyPage({ certificateId, onBack }) {
                 <XCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
                 <div>
                   <span className="font-semibold block mb-0.5">Integrity Verification Failed</span>
-                  <span>{data.reason}</span>
+                  <span>{data?.reason || "Integrity verification failed"}</span>
                 </div>
               </div>
             ) : isOverride ? (
@@ -450,7 +465,7 @@ export default function PublicVerifyPage({ certificateId, onBack }) {
                 <AlertTriangle className="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" />
                 <div>
                   <span className="font-semibold block mb-0.5">Issued with Override: Security Finding Overridden</span>
-                  <span>{cert.securityOverride || "Security finding overridden by creator"}. Stored certificate record and signature are tamper-evident, signed by the server.</span>
+                  <span>{cert?.securityOverride || "Security finding overridden by creator"}. Stored certificate record and signature are tamper-evident, signed by the server.</span>
                 </div>
               </div>
             ) : (
@@ -458,7 +473,7 @@ export default function PublicVerifyPage({ certificateId, onBack }) {
                 <CheckCircle2 className="w-5 h-5 text-emerald-400 flex-shrink-0 mt-0.5" />
                 <div>
                   <span className="font-semibold block mb-0.5">Integrity Verification Succeeded</span>
-                  <span>{data.message}</span>
+                  <span>{data?.message || "Integrity verification succeeded"}</span>
                 </div>
               </div>
             )}
