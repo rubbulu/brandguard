@@ -1673,7 +1673,8 @@ export default function App() {
         if (data.success) {
           showNotice(data.message || "AI suggestions generated successfully.");
         } else {
-          showNotice(`Retry failed: ${data.error || "Could not generate AI suggestions"}`);
+          const errText = data.error || "Could not generate AI suggestions";
+          showNotice(errText.includes("busy right now") ? errText : `Retry failed: ${errText}`);
         }
         await loadWorkspaceData();
       } else {

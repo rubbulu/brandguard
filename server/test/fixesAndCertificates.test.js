@@ -28,6 +28,8 @@ import { detectPromptInjection } from "../securityScanner.js";
 import { compareChannelTones, resolveChannelProfile, validateFindings } from "../validator.js";
 import { INITIAL_TONE_PROFILES, INITIAL_RULES, INITIAL_FACTS, INITIAL_BRAND_TERMS } from "../demoData.js";
 import { loadWorkspace, saveWorkspace } from "../workspaceStore.js";
+import { callGeminiReview, callGeminiWithRetry, BUSY_ERROR_MESSAGE } from "../geminiService.js";
+import { callGeminiGuidelineExtraction } from "../guidelineService.js";
 import { app } from "../index.js";
 
 function invokeApp(options) {
@@ -1661,6 +1663,205 @@ describe("Round 3: Removal, Security, Design Fixes & Certificate Verification", 
     }
 
     assert.equal(issues.length, 0, `Expected 0 undefined or TDZ references across client, found: ${JSON.stringify(issues)}`);
+  });
+
+  // Test 32: 503 then success returns success on retry
+  test("mocked response: 503 then success returns success on retry", async () => {
+    const origFetch = global.fetch;
+    let attempts = 0;
+    global.fetch = async () => {
+      attempts++;
+      if (attempts === 1) {
+        return {
+          status: 503,
+          ok: false,
+          text: async () => "Service Unavailable"
+        };
+      }
+      return {
+        status: 200,
+        ok: true,
+        json: async () => ({
+          candidates: [{
+            content: {
+              parts: [{
+                text: JSON.stringify({ findings: [] })
+              }]
+            }
+          }]
+        })
+      };
+    };
+
+    try {
+      const result = await callGeminiReview({
+        apiKey: "mock-key-503-retry",
+        draftText: "A valid draft text for review.",
+        rules: [],
+        facts: [],
+        retryDelays: [10, 20]
+      });
+      assert.equal(attempts, 2, "Must retry once and succeed on 2nd attempt");
+      assert.deepEqual(result.findings, [], "Must return parsed findings on success");
+    } finally {
+      global.fetch = origFetch;
+    }
+  });
+
+  // Test 33: 503 three times returns friendly message with no repeated prefixes
+  test("mocked response: 503 three times returns friendly message with no repeated prefixes", async () => {
+    const origFetch = global.fetch;
+    const origDelays = process.env.GEMINI_RETRY_DELAYS;
+    process.env.GEMINI_RETRY_DELAYS = "[10, 20]";
+    let attempts = 0;
+    global.fetch = async () => {
+      attempts++;
+      return {
+        status: 503,
+        ok: false,
+        text: async () => "Service Unavailable"
+      };
+    };
+
+    try {
+      let thrown = null;
+      try {
+        await callGeminiGuidelineExtraction({
+          apiKey: "mock-key-503-all",
+          safeText: "CampusPro guideline text."
+        });
+      } catch (e) {
+        thrown = e;
+      }
+
+      assert.equal(attempts, 3, "Never make more than 3 attempts in total");
+      assert.ok(thrown, "Must throw an error when all 3 attempts fail");
+      assert.equal(
+        thrown.message,
+        "Google's AI service is busy right now. Please click Retry in a moment.",
+        "Error message must be the plain friendly message"
+      );
+      assert.ok(!thrown.message.includes("gemini"), "Never expose raw model names in user message");
+      assert.ok(!thrown.message.includes("503"), "Status code is logged on server only");
+
+      // Verify endpoint /api/guidelines/extract returns the plain message without repeated prefixes
+      attempts = 0;
+      const wsId = `ws-guideline-503-${Date.now()}`;
+      const res = await invokeApp({
+        method: "POST",
+        url: "/api/guidelines/extract",
+        headers: { "Content-Type": "application/json", "x-workspace-id": wsId },
+        body: { text: "CampusPro is a university platform." }
+      });
+      const data = await res.json();
+      assert.equal(attempts, 3, "Endpoint call must also attempt at most 3 times");
+      assert.equal(data.error, "Google's AI service is busy right now. Please click Retry in a moment.");
+      assert.equal(data.canRetry, true);
+      assert.ok(!data.error.includes("AI proposal extraction failed"), "No repeated prefixes in error");
+    } finally {
+      global.fetch = origFetch;
+      process.env.GEMINI_RETRY_DELAYS = origDelays;
+    }
+  });
+
+  // Test 34: 400 is not retried
+  test("mocked response: 400 is not retried", async () => {
+    const origFetch = global.fetch;
+    let attempts = 0;
+    global.fetch = async () => {
+      attempts++;
+      return {
+        status: 400,
+        ok: false,
+        text: async () => "Bad Request"
+      };
+    };
+
+    try {
+      let thrown = null;
+      try {
+        await callGeminiWithRetry({
+          apiKey: "mock-key-400",
+          payload: { contents: [{ parts: [{ text: "draft" }] }] },
+          delays: [10, 20]
+        });
+      } catch (e) {
+        thrown = e;
+      }
+
+      assert.equal(attempts, 1, "400 error must NOT be retried (exactly 1 attempt)");
+      assert.ok(thrown, "Must throw on 400 error");
+      assert.notEqual(
+        thrown.message,
+        "Google's AI service is busy right now. Please click Retry in a moment.",
+        "400 is not considered a service busy error"
+      );
+    } finally {
+      global.fetch = origFetch;
+    }
+  });
+
+  // Test 35: a retry does not create duplicate drafts or duplicate decisions
+  test("a retry does not create duplicate drafts or duplicate decisions", async () => {
+    const wsId = `ws-retry-idemp-${Date.now()}`;
+    const draftText = "CampusPro is designed for universities.";
+
+    // 1. Create draft
+    const draftRes = await invokeApp({
+      method: "POST",
+      url: "/api/drafts",
+      headers: { "Content-Type": "application/json", "x-workspace-id": wsId },
+      body: { title: "Retry Idempotency Draft", channel: "Web / Campaign", content: draftText }
+    });
+    const draft = await draftRes.json();
+    assert.equal(draftRes.status, 201);
+
+    // 2. Perform review twice (simulating creator retrying review after transient failure)
+    await invokeApp({
+      method: "POST",
+      url: "/api/review",
+      headers: { "Content-Type": "application/json", "x-workspace-id": wsId },
+      body: { draftId: draft.id, draftText: draftText, channel: "Web / Campaign" }
+    });
+    await invokeApp({
+      method: "POST",
+      url: "/api/review",
+      headers: { "Content-Type": "application/json", "x-workspace-id": wsId },
+      body: { draftId: draft.id, draftText: draftText, channel: "Web / Campaign" }
+    });
+
+    const ws1 = loadWorkspace(wsId);
+    const matchingDrafts = (ws1.drafts || []).filter(d => d.id === draft.id);
+    assert.equal(matchingDrafts.length, 1, "Retrying review must not create duplicate drafts in workspace");
+
+    // 3. Test proposal decision retry idempotency
+    const proposalId = "prop-test-1";
+    ws1.proposals = [
+      { id: proposalId, type: "rule", title: "Test Rule", text: "Test rule policy text.", category: "policy", severity: "medium", status: "pending" }
+    ];
+    saveWorkspace(wsId, ws1);
+
+    // First decision: approve
+    const decRes1 = await invokeApp({
+      method: "POST",
+      url: `/api/guidelines/proposals/${proposalId}/decide`,
+      headers: { "Content-Type": "application/json", "x-workspace-id": wsId },
+      body: { action: "approve" }
+    });
+    assert.equal(decRes1.status, 200);
+
+    // Retry decision: approve again (e.g. double click or retry)
+    const decRes2 = await invokeApp({
+      method: "POST",
+      url: `/api/guidelines/proposals/${proposalId}/decide`,
+      headers: { "Content-Type": "application/json", "x-workspace-id": wsId },
+      body: { action: "approve" }
+    });
+    assert.equal(decRes2.status, 200);
+
+    const ws2 = loadWorkspace(wsId);
+    const approvedRules = (ws2.rules || []).filter(r => r.text === "Test rule policy text.");
+    assert.equal(approvedRules.length, 1, "Retrying proposal approval must not duplicate rules in library");
   });
 
 });

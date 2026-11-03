@@ -13,7 +13,7 @@
 import { PDFParse } from "pdf-parse";
 import mammoth from "mammoth";
 import { detectPromptInjection } from "./securityScanner.js";
-import { ACTIVE_MODEL, CANDIDATE_MODELS } from "./geminiService.js";
+import { ACTIVE_MODEL, CANDIDATE_MODELS, callGeminiWithRetry, BUSY_ERROR_MESSAGE } from "./geminiService.js";
 
 const MAX_FILE_SIZE = 2 * 1024 * 1024; // 2 MB
 const MAX_TEXT_LENGTH = 15000; // 15,000 characters
@@ -405,7 +405,7 @@ export function getNextId(type, workspace) {
 /**
  * Calls Gemini to extract brand rule and fact proposals from sanitized text.
  */
-export async function callGeminiGuidelineExtraction({ apiKey, safeText }) {
+export async function callGeminiGuidelineExtraction({ apiKey, safeText, retryDelays }) {
   if (!apiKey) {
     throw new Error("GEMINI_API_KEY is not configured on the server.");
   }
@@ -464,57 +464,22 @@ Extract all concrete brand rules and verified facts from the text above. Return 
     }
   };
 
-  let lastError = null;
+  const { data } = await callGeminiWithRetry({
+    apiKey,
+    payload,
+    candidateModels: CANDIDATE_MODELS,
+    delays: retryDelays
+  });
 
-  for (const model of CANDIDATE_MODELS) {
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 45000);
+  let rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!rawText) return [];
 
-      let response = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-        signal: controller.signal
-      });
+  rawText = rawText.trim();
+  if (rawText.startsWith("```json")) rawText = rawText.slice(7);
+  if (rawText.startsWith("```")) rawText = rawText.slice(3);
+  if (rawText.endsWith("```")) rawText = rawText.slice(0, -3);
+  rawText = rawText.trim();
 
-      if (response.status === 400 && payload.generationConfig.thinkingConfig) {
-        const noThinkingPayload = JSON.parse(JSON.stringify(payload));
-        delete noThinkingPayload.generationConfig.thinkingConfig;
-        response = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(noThinkingPayload),
-          signal: controller.signal
-        });
-      }
-
-      clearTimeout(timeout);
-
-      if (response.ok) {
-        const data = await response.json();
-        let rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (!rawText) return [];
-
-        rawText = rawText.trim();
-        if (rawText.startsWith("```json")) rawText = rawText.slice(7);
-        if (rawText.startsWith("```")) rawText = rawText.slice(3);
-        if (rawText.endsWith("```")) rawText = rawText.slice(0, -3);
-        rawText = rawText.trim();
-
-        const parsed = JSON.parse(rawText);
-        return Array.isArray(parsed) ? parsed : (parsed.proposals || []);
-      }
-
-      const errBody = await response.text();
-      console.warn(`[Gemini Guideline ${model}] Error (${response.status}): ${errBody.slice(0, 120)}`);
-      lastError = new Error(`Model ${model} returned ${response.status}`);
-    } catch (err) {
-      lastError = err;
-      console.warn(`[Gemini Guideline ${model}] Failed: ${err.message}`);
-    }
-  }
-
-  throw new Error(`AI Guideline extraction failed: ${lastError?.message || "Service unavailable"}`);
+  const parsed = JSON.parse(rawText);
+  return Array.isArray(parsed) ? parsed : (parsed.proposals || []);
 }

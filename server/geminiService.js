@@ -57,7 +57,122 @@ export const CANDIDATE_MODELS = [
   "gemini-flash-lite-latest"
 ].filter((v, i, a) => a.indexOf(v) === i);
 
-export async function callGeminiReview({ apiKey, draftText, rules, facts }) {
+export const BUSY_ERROR_MESSAGE = "Google's AI service is busy right now. Please click Retry in a moment.";
+
+const DEFAULT_RETRY_DELAYS = process.env.GEMINI_RETRY_DELAYS
+  ? JSON.parse(process.env.GEMINI_RETRY_DELAYS)
+  : [1000, 2500];
+
+/**
+ * Shared helper for executing Gemini API calls with automatic retry on HTTP 503 or 429.
+ * - On HTTP 503 or 429, retry up to 2 more times (max 3 attempts total).
+ * - Wait delays: ~1 second (attempt 2), then ~2.5 seconds (attempt 3).
+ * - Never make more than 3 attempts in total.
+ * - Do NOT retry other errors (400, 401, 403, 404, safety blocks, invalid JSON).
+ * - If all attempts fail, throws an Error with: "Google's AI service is busy right now. Please click Retry in a moment."
+ * - Logs HTTP status code on server only. Never reveals raw model names or stack traces in UI errors.
+ */
+export async function callGeminiWithRetry({
+  apiKey,
+  payload,
+  candidateModels = CANDIDATE_MODELS,
+  delays = DEFAULT_RETRY_DELAYS,
+  timeoutMs = 45000
+}) {
+  if (!apiKey) {
+    throw new Error("GEMINI_API_KEY is not configured.");
+  }
+
+  const models = Array.isArray(candidateModels) && candidateModels.length > 0
+    ? candidateModels
+    : [ACTIVE_MODEL];
+
+  let totalAttempts = 0;
+  const maxAttempts = 3;
+  let lastError = null;
+
+  for (const model of models) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+    while (totalAttempts < maxAttempts) {
+      totalAttempts++;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+      let response;
+      try {
+        response = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          signal: controller.signal
+        });
+
+        // Instant compatibility fallback if model does not support thinkingConfig (HTTP 400)
+        if (response.status === 400 && payload.generationConfig?.thinkingConfig) {
+          const noThinkingPayload = JSON.parse(JSON.stringify(payload));
+          delete noThinkingPayload.generationConfig.thinkingConfig;
+          response = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(noThinkingPayload),
+            signal: controller.signal
+          });
+        }
+      } catch (fetchErr) {
+        clearTimeout(timeout);
+        lastError = fetchErr;
+        console.warn(`[Gemini API] Call error: ${fetchErr.message}`);
+        break; // Do not retry network abort/error
+      } finally {
+        clearTimeout(timeout);
+      }
+
+      if (response.ok) {
+        const data = await response.json();
+        return { data, model };
+      }
+
+      // Log status code on the server only
+      console.warn(`[Gemini API] Server returned HTTP ${response.status} (attempt ${totalAttempts}/${maxAttempts})`);
+
+      // Retry ONLY on HTTP 503 or 429
+      if ((response.status === 503 || response.status === 429) && totalAttempts < maxAttempts) {
+        const delayMs = delays[totalAttempts - 1] ?? (totalAttempts === 1 ? 1000 : 2500);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+        continue;
+      }
+
+      // If 503 or 429 failed on final attempt
+      if (response.status === 503 || response.status === 429) {
+        const busyErr = new Error(BUSY_ERROR_MESSAGE);
+        busyErr.isBusy = true;
+        busyErr.status = response.status;
+        throw busyErr;
+      }
+
+      // Other non-retryable error (400, 401, 403, 404, etc.)
+      const otherErr = new Error(`Model returned ${response.status}`);
+      otherErr.status = response.status;
+      lastError = otherErr;
+      break; // move to next model if 404, or throw
+    }
+
+    if (totalAttempts >= maxAttempts) {
+      break;
+    }
+  }
+
+  if (lastError?.isBusy || lastError?.status === 503 || lastError?.status === 429) {
+    const busyErr = new Error(BUSY_ERROR_MESSAGE);
+    busyErr.isBusy = true;
+    throw busyErr;
+  }
+
+  throw lastError || new Error("Gemini unavailable");
+}
+
+export async function callGeminiReview({ apiKey, draftText, rules, facts, retryDelays }) {
   if (!apiKey) {
     throw new Error("GEMINI_API_KEY is not configured.");
   }
@@ -90,7 +205,7 @@ IMPORTANT INSTRUCTIONS:
     }
   };
 
-  const buildPayload = (cfg) => ({
+  const payload = {
     system_instruction: {
       parts: [{ text: SYSTEM_INSTRUCTION }]
     },
@@ -100,62 +215,26 @@ IMPORTANT INSTRUCTIONS:
         parts: [{ text: userContent }]
       }
     ],
-    generationConfig: cfg
+    generationConfig: genConfig
+  };
+
+  const { data, model } = await callGeminiWithRetry({
+    apiKey,
+    payload,
+    candidateModels: CANDIDATE_MODELS,
+    delays: retryDelays
   });
 
-  let lastError = null;
+  let rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!rawText) return { findings: [], model };
 
-  for (const model of CANDIDATE_MODELS) {
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 45000);
+  rawText = rawText.trim();
+  if (rawText.startsWith("```json")) rawText = rawText.slice(7);
+  if (rawText.startsWith("```")) rawText = rawText.slice(3);
+  if (rawText.endsWith("```")) rawText = rawText.slice(0, -3);
+  rawText = rawText.trim();
 
-      let response = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(buildPayload(genConfig)),
-        signal: controller.signal
-      });
-
-      // If model does not support thinkingConfig (HTTP 400), retry instantly without thinkingConfig
-      if (response.status === 400 && genConfig.thinkingConfig) {
-        const noThinkingCfg = { ...genConfig };
-        delete noThinkingCfg.thinkingConfig;
-        response = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(buildPayload(noThinkingCfg)),
-          signal: controller.signal
-        });
-      }
-
-      clearTimeout(timeout);
-
-      if (response.ok) {
-        const data = await response.json();
-        let rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (!rawText) return { findings: [], model };
-
-        rawText = rawText.trim();
-        if (rawText.startsWith("```json")) rawText = rawText.slice(7);
-        if (rawText.startsWith("```")) rawText = rawText.slice(3);
-        if (rawText.endsWith("```")) rawText = rawText.slice(0, -3);
-        rawText = rawText.trim();
-
-        const parsed = JSON.parse(rawText);
-        const findings = Array.isArray(parsed) ? parsed : (parsed.findings || []);
-        return { findings, model };
-      }
-
-      const errBody = await response.text();
-      console.warn(`[Gemini ${model}] Error (${response.status}): ${errBody.slice(0, 120)}`);
-      lastError = new Error(`Model ${model} returned ${response.status}`);
-    } catch (err) {
-      lastError = err;
-      console.warn(`[Gemini ${model}] Failed: ${err.message}`);
-    }
-  }
-
-  throw new Error(`AI Review failed across all models: ${lastError?.message || "Unavailable"}`);
+  const parsed = JSON.parse(rawText);
+  const findings = Array.isArray(parsed) ? parsed : (parsed.findings || []);
+  return { findings, model };
 }

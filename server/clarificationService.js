@@ -13,8 +13,8 @@
  */
 
 import { detectPromptInjection } from "./securityScanner.js";
-import { ACTIVE_MODEL, CANDIDATE_MODELS } from "./geminiService.js";
-export { ACTIVE_MODEL, CANDIDATE_MODELS };
+import { ACTIVE_MODEL, CANDIDATE_MODELS, callGeminiWithRetry, BUSY_ERROR_MESSAGE } from "./geminiService.js";
+export { ACTIVE_MODEL, CANDIDATE_MODELS, BUSY_ERROR_MESSAGE };
 
 /**
  * Computes dispute statistics for a specific rule from stored drafts.
@@ -141,6 +141,16 @@ export function normalizeAiFailureReason(errOrReason) {
   let msg = typeof errOrReason === "string" ? errOrReason : errOrReason.message || "";
   msg = msg.trim();
   const lower = msg.toLowerCase();
+
+  // 0. Busy / 503 / 429 retries exhausted
+  if (
+    msg === BUSY_ERROR_MESSAGE ||
+    lower.includes("busy right now") ||
+    lower.includes("service is busy") ||
+    lower.includes("503")
+  ) {
+    return BUSY_ERROR_MESSAGE;
+  }
 
   // 1. Timeout
   if (lower.includes("timed out") || lower.includes("timeout") || lower.includes("abort") || lower.includes("504") || lower.includes("etimedout")) {
@@ -337,7 +347,7 @@ export function validateClarificationOutput({ aiResult, currentText, ruleId, rul
 /**
  * Calls Gemini to generate a clarifying question and 2-3 suggested wordings.
  */
-export async function callGeminiClarification({ apiKey, rule, stats, examples }) {
+export async function callGeminiClarification({ apiKey, rule, stats, examples, retryDelays }) {
   if (!apiKey) {
     throw new Error("GEMINI_API_KEY is not configured on the server.");
   }
@@ -403,56 +413,24 @@ Please generate ONE clarifying question for the brand manager and 2 to 3 clearer
     }
   };
 
-  let lastError = null;
+  const { data } = await callGeminiWithRetry({
+    apiKey,
+    payload,
+    candidateModels: CANDIDATE_MODELS,
+    delays: retryDelays,
+    timeoutMs: 35000
+  });
 
-  for (const model of CANDIDATE_MODELS) {
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 35000);
+  let rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!rawText) throw new Error("Empty candidate response from Gemini");
 
-      let response = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-        signal: controller.signal
-      });
+  rawText = rawText.trim();
+  if (rawText.startsWith("```json")) rawText = rawText.slice(7);
+  if (rawText.startsWith("```")) rawText = rawText.slice(3);
+  if (rawText.endsWith("```")) rawText = rawText.slice(0, -3);
+  rawText = rawText.trim();
 
-      if (response.status === 400 && payload.generationConfig?.thinkingConfig) {
-        const noThinkingPayload = JSON.parse(JSON.stringify(payload));
-        delete noThinkingPayload.generationConfig.thinkingConfig;
-        response = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(noThinkingPayload),
-          signal: controller.signal
-        });
-      }
-
-      clearTimeout(timeout);
-
-      if (response.ok) {
-        const data = await response.json();
-        let rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (!rawText) throw new Error("Empty candidate response from Gemini");
-
-        rawText = rawText.trim();
-        if (rawText.startsWith("```json")) rawText = rawText.slice(7);
-        if (rawText.startsWith("```")) rawText = rawText.slice(3);
-        if (rawText.endsWith("```")) rawText = rawText.slice(0, -3);
-        rawText = rawText.trim();
-
-        return JSON.parse(rawText);
-      }
-
-      const errBody = await response.text();
-      lastError = new Error(`Model ${model} returned ${response.status}: ${errBody.slice(0, 100)}`);
-    } catch (err) {
-      lastError = err;
-    }
-  }
-
-  throw new Error(`AI Clarification generation failed: ${lastError?.message || "Service unavailable"}`);
+  return JSON.parse(rawText);
 }
 
 /**

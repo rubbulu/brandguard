@@ -1,7 +1,7 @@
 import sharp from "sharp";
 import path from "path";
 import fs from "fs";
-import { callGeminiReview, ACTIVE_MODEL, CANDIDATE_MODELS } from "./geminiService.js";
+import { callGeminiReview, callGeminiWithRetry, ACTIVE_MODEL, CANDIDATE_MODELS } from "./geminiService.js";
 import { validateFindings, mergeFindings } from "./validator.js";
 import { getWorkspaceImagesDir } from "./workspaceStore.js";
 import { detectPromptInjection } from "./securityScanner.js";
@@ -688,37 +688,18 @@ export async function runVisualAudit({
     });
 
     const executeCall = async () => {
-      let lastVisionError = null;
-      for (const model of CANDIDATE_MODELS) {
-        try {
-          const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-          const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 45000);
-
-          const response = await fetch(url, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(buildPayload(genConfig)),
-            signal: controller.signal
-          });
-
-          clearTimeout(timeout);
-
-          if (response.ok) {
-            const rawJson = await response.json();
-            let rawText = rawJson.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
-            return parseVisionOutput(rawText);
-          } else {
-            const errBody = await response.text();
-            console.warn(`[Visual Gemini ${model}] ${response.status}: ${errBody.slice(0, 100)}`);
-            lastVisionError = new Error(`Vision model returned ${response.status}`);
-          }
-        } catch (err) {
-          console.warn(`[Visual Gemini ${model}] failed: ${err.message}`, err.cause || "");
-          lastVisionError = err;
-        }
+      try {
+        const { data } = await callGeminiWithRetry({
+          apiKey,
+          payload: buildPayload(genConfig),
+          candidateModels: CANDIDATE_MODELS
+        });
+        const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+        return parseVisionOutput(rawText);
+      } catch (err) {
+        console.warn(`[Visual Gemini] call failed: ${err.message}`);
+        return null;
       }
-      return null;
     };
 
     let visionData = await executeCall();

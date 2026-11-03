@@ -12,7 +12,7 @@ import {
   INITIAL_TONE_PROFILES,
   INITIAL_BRAND_TERMS
 } from "./demoData.js";
-import { callGeminiReview, ACTIVE_MODEL } from "./geminiService.js";
+import { callGeminiReview, ACTIVE_MODEL, BUSY_ERROR_MESSAGE } from "./geminiService.js";
 import { validateFindings, compareChannelTones, resolveChannelProfile } from "./validator.js";
 import { loadWorkspace, saveWorkspace, resetWorkspace } from "./workspaceStore.js";
 import { runVisualAudit, clearVisualAuditCache } from "./visualAuditor.js";
@@ -331,8 +331,9 @@ app.post("/api/guidelines/extract", async (req, res) => {
           safeText
         });
       } catch (aiErr) {
+        const isBusy = aiErr.isBusy || aiErr.message === BUSY_ERROR_MESSAGE || aiErr.message?.includes("busy right now") || aiErr.message?.includes("503");
         return res.status(502).json({
-          error: `AI proposal extraction failed: ${aiErr.message}`,
+          error: isBusy ? BUSY_ERROR_MESSAGE : `AI proposal extraction failed: ${aiErr.message}`,
           canRetry: true
         });
       }
@@ -689,7 +690,8 @@ app.post("/api/clarifications/:id/retry", async (req, res) => {
       requests: req.workspace.clarificationRequests
     });
   } catch (err) {
-    res.status(500).json({ error: `Failed to retry AI suggestions: ${err.message}` });
+    const isBusy = err.isBusy || err.message === BUSY_ERROR_MESSAGE || err.message?.includes("busy right now") || err.message?.includes("503");
+    res.status(500).json({ error: isBusy ? BUSY_ERROR_MESSAGE : `Failed to retry AI suggestions: ${err.message}` });
   }
 });
 
