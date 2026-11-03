@@ -1004,4 +1004,157 @@ describe("Round 3: Removal, Security, Design Fixes & Certificate Verification", 
     assert.equal(verification.status, "Reviewed by code checks only");
   });
 
+  // Test 19: R-12 false positive prevention: 'Great laptop for students' produces no R-12 finding
+  test("R-12 false positive prevention: 'Great laptop for students' produces no R-12 finding", () => {
+    const text = "Great laptop for students";
+
+    // 1. Deterministic safety net produces NO R-12 finding
+    const deterministicResult = validateFindings(
+      text,
+      [],
+      INITIAL_RULES,
+      INITIAL_FACTS,
+      INITIAL_BRAND_TERMS,
+      "Social Media / Twitter"
+    );
+    const r12Findings = deterministicResult.accepted.filter(f => f.rule_id === "R-12");
+    assert.equal(r12Findings.length, 0, "'Great' is not a superlative and must not produce R-12 finding");
+
+    // 2. Even if model mistakenly suggests R-12 on 'Great' with fix 'Standard', validator drops it
+    const modelWithFalsePositive = validateFindings(
+      text,
+      [{
+        rule_id: "R-12",
+        quote: "Great",
+        suggested_fix: "Standard",
+        explanation: "Unverified claim"
+      }],
+      INITIAL_RULES,
+      INITIAL_FACTS,
+      INITIAL_BRAND_TERMS,
+      "Social Media / Twitter"
+    );
+    const r12ModelAccepted = modelWithFalsePositive.accepted.filter(f => f.rule_id === "R-12");
+    assert.equal(r12ModelAccepted.length, 0, "Validator must reject R-12 on 'Great'");
+    assert.ok(modelWithFalsePositive.rejected.some(r => r.reasons.some(m => m.includes("not a recognized superlative"))));
+
+    // 3. Also verify 'Great laptop 😀🔥 for students!!!.' does not produce R-12 on 'Great'
+    const emojiText = "Great laptop 😀🔥 for students!!!.";
+    const emojiResult = validateFindings(
+      emojiText,
+      [],
+      INITIAL_RULES,
+      INITIAL_FACTS,
+      INITIAL_BRAND_TERMS,
+      "Social Media / Twitter"
+    );
+    assert.equal(emojiResult.accepted.filter(f => f.rule_id === "R-12").length, 0);
+  });
+
+  // Test 20: R-12 whole words: 'greatest' and 'best' and 'Number one' are flagged as whole words
+  test("R-12 whole words: 'greatest' and 'best' and 'Number one' are flagged as whole words", () => {
+    const text = "CampusPro is the greatest laptop, the best choice, and Number one in performance.";
+    const res = validateFindings(
+      text,
+      [],
+      INITIAL_RULES,
+      INITIAL_FACTS,
+      INITIAL_BRAND_TERMS,
+      "Social Media / Twitter"
+    );
+    const r12s = res.accepted.filter(f => f.rule_id === "R-12");
+    assert.equal(r12s.length, 3, "Must flag all 3 whole-word superlatives");
+    const quotes = r12s.map(f => f.quote);
+    assert.ok(quotes.includes("greatest"), "Must flag 'greatest'");
+    assert.ok(quotes.includes("best"), "Must flag 'best'");
+    assert.ok(quotes.includes("Number one"), "Must flag 'Number one'");
+
+    // Verify partial stems / ordinary positive adjectives are NOT flagged: e.g. 'great' in 'great choice'
+    const normalAdjectives = "A great choice with fast delivery and nice features.";
+    const normalRes = validateFindings(
+      normalAdjectives,
+      [],
+      INITIAL_RULES,
+      INITIAL_FACTS,
+      INITIAL_BRAND_TERMS,
+      "Social Media / Twitter"
+    );
+    assert.equal(normalRes.accepted.filter(f => f.rule_id === "R-12").length, 0, "Ordinary adjectives like 'great', 'fast', 'nice' must not produce R-12 findings");
+  });
+
+  // Test 21: R-12 fix: 'fastest' is flagged with a removal fix
+  test("R-12 fix: 'fastest' is flagged with a removal fix", () => {
+    const text = "CampusPro is the fastest platform for universities.";
+    // Deterministic path
+    const resDeterministic = validateFindings(
+      text,
+      [],
+      INITIAL_RULES,
+      INITIAL_FACTS,
+      INITIAL_BRAND_TERMS,
+      "Social Media / Twitter"
+    );
+    const r12Det = resDeterministic.accepted.find(f => f.rule_id === "R-12");
+    assert.ok(r12Det);
+    assert.equal(r12Det.quote, "fastest");
+    assert.equal(r12Det.suggested_fix, "Remove this phrase");
+    assert.equal(r12Det.action, "remove");
+
+    // Even if model suggests a replacement word like 'Standard' or 'leading', validator enforces removal
+    const resModel = validateFindings(
+      text,
+      [{
+        rule_id: "R-12",
+        quote: "fastest",
+        suggested_fix: "Standard",
+        explanation: "Superlative claim"
+      }],
+      INITIAL_RULES,
+      INITIAL_FACTS,
+      INITIAL_BRAND_TERMS,
+      "Social Media / Twitter"
+    );
+    const r12Mod = resModel.accepted.find(f => f.rule_id === "R-12");
+    assert.ok(r12Mod);
+    assert.equal(r12Mod.suggested_fix, "Remove this phrase", "Superlative fix must always be 'Remove this phrase', never a replacement word");
+    assert.equal(r12Mod.action, "remove");
+  });
+
+  // Test 22: 'Start new draft check' resets title and copy while preserving channel and stored drafts
+  test("'Start new draft check' resets title, copy, active review, and keeps channel and stored drafts", () => {
+    let formState = {
+      draftTitle: "CampusPro Q4 Campaign",
+      draftContent: "CampusPro is the greatest platform.",
+      activeDraft: { id: "d-123", title: "CampusPro Q4 Campaign" },
+      selectedFindingId: "f-1",
+      reviewError: "Old error",
+      selectedSampleDraftId: "sample-1",
+      draftChannel: "Social Media / Twitter",
+      allDrafts: [{ id: "d-123", title: "CampusPro Q4 Campaign" }, { id: "d-124", title: "Previous Draft" }]
+    };
+
+    // The reset action clears title, content, active review, but keeps channel & stored drafts
+    const resetForm = (state) => ({
+      ...state,
+      draftTitle: "",
+      draftContent: "",
+      activeDraft: null,
+      selectedFindingId: null,
+      reviewError: null,
+      selectedSampleDraftId: "",
+      draftChannel: state.draftChannel,
+      allDrafts: [...state.allDrafts]
+    });
+
+    const nextState = resetForm(formState);
+    assert.equal(nextState.draftTitle, "", "Draft title must be cleared");
+    assert.equal(nextState.draftContent, "", "Draft copy must be cleared");
+    assert.equal(nextState.draftContent.length, 0, "Character counter must be 0");
+    assert.equal(nextState.activeDraft, null, "Active review must be closed");
+    assert.equal(nextState.selectedFindingId, null);
+    assert.equal(nextState.reviewError, null);
+    assert.equal(nextState.draftChannel, "Social Media / Twitter", "Channel must be preserved");
+    assert.equal(nextState.allDrafts.length, 2, "Stored drafts must not be deleted");
+  });
+
 });

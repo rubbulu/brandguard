@@ -123,13 +123,14 @@ export function loadWorkspace(workspaceId) {
         const t06Rule = INITIAL_RULES.find(r => r.id === "T-06");
         if (t06Rule) data.rules.push({ ...t06Rule });
       }
-      // Ensure bannedTerms are populated from INITIAL_RULES if missing
+      // Ensure bannedTerms are populated from INITIAL_RULES
       for (const rule of data.rules) {
-        if (!rule.bannedTerms) {
-          const initRule = INITIAL_RULES.find(r => r.id === rule.id);
-          if (initRule && initRule.bannedTerms) {
-            rule.bannedTerms = [...initRule.bannedTerms];
-          }
+        const initRule = INITIAL_RULES.find(r => r.id === rule.id);
+        if (!rule.bannedTerms && initRule && initRule.bannedTerms) {
+          rule.bannedTerms = [...initRule.bannedTerms];
+        }
+        if (rule.id === "R-12" && initRule && initRule.bannedTerms) {
+          rule.bannedTerms = [...initRule.bannedTerms];
         }
       }
       if (!Array.isArray(data.facts)) data.facts = JSON.parse(JSON.stringify(INITIAL_FACTS));

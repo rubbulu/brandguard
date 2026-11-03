@@ -223,6 +223,7 @@ export default function App() {
   const [draftTitle, setDraftTitle] = useState("");
   const [draftChannel, setDraftChannel] = useState("Social Media / Twitter");
   const [draftContent, setDraftContent] = useState("");
+  const draftCopyInputRef = useRef(null);
   const [activeDraft, setActiveDraft] = useState(null);
   const [allDrafts, setAllDrafts] = useState([]);
   const [isReviewing, setIsReviewing] = useState(false);
@@ -909,6 +910,23 @@ export default function App() {
     setDraftContent(sample.content);
     setReviewError(null);
     setSelectedSampleDraftId(sample.id);
+  };
+
+  // Reset form and start new draft check (Bug 2 fix)
+  const handleStartNewDraft = () => {
+    setDraftTitle("");
+    setDraftContent("");
+    setActiveDraft(null);
+    setSelectedFindingId(null);
+    setReviewError(null);
+    setSelectedSampleDraftId("");
+    setAnalyzingDraftTitle(null);
+    try {
+      sessionStorage.removeItem("brandguard_active_draft_id");
+    } catch (_) {}
+    setTimeout(() => {
+      draftCopyInputRef.current?.focus();
+    }, 50);
   };
 
   // Submit Draft & Run AI Check
@@ -4303,6 +4321,18 @@ export default function App() {
                       <span>Compare Channels</span>
                     </button>
 
+                    {(draftContent || draftTitle || activeDraft) && (
+                      <button
+                        type="button"
+                        onClick={handleStartNewDraft}
+                        className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold flex items-center gap-1.5 focus:outline-none focus:ring-2 focus:ring-slate-400 transition-all shadow-2xs"
+                        title="Clear form and start a new draft check"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>Start new draft check</span>
+                      </button>
+                    )}
+
                     <select
                       value={selectedSampleDraftId}
                       onChange={(e) => {
@@ -4372,6 +4402,7 @@ export default function App() {
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">Draft Copy</label>
                   <textarea
+                    ref={draftCopyInputRef}
                     rows={3}
                     value={draftContent}
                     onChange={(e) => setDraftContent(e.target.value)}
@@ -4623,10 +4654,7 @@ export default function App() {
                   {activeDraft && (
                     <button
                       type="button"
-                      onClick={() => {
-                        setActiveDraft(null);
-                        setSelectedFindingId(null);
-                      }}
+                      onClick={handleStartNewDraft}
                       className="text-xs font-semibold text-blue-600 hover:text-blue-800 flex items-center gap-1"
                     >
                       <Plus className="w-3.5 h-3.5" />
@@ -4865,15 +4893,12 @@ export default function App() {
                       <div className="flex items-center gap-2">
                         <button
                           type="button"
-                          onClick={() => {
-                            setActiveDraft(null);
-                            setSelectedFindingId(null);
-                          }}
+                          onClick={handleStartNewDraft}
                           className="px-2.5 py-1 text-xs font-semibold text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors flex items-center gap-1"
-                          title="Deselect draft and show blank creator input"
+                          title="Start new draft check"
                         >
                           <Plus className="w-3.5 h-3.5" />
-                          <span>New Draft</span>
+                          <span>Start new draft check</span>
                         </button>
                         <div className="flex items-center gap-1.5 text-[11px]">
                         <span className="flex items-center gap-1 text-red-700 bg-red-50 px-2 py-0.5 rounded">

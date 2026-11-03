@@ -909,6 +909,19 @@ export function validateFindings(
     const matchedRuleForFactCheck = rules.find(r => r.id && r.id.trim().toUpperCase() === ruleId);
     if (ruleId === "R-12" || (matchedRuleForFactCheck && Array.isArray(matchedRuleForFactCheck.bannedTerms))) {
       const bannedList = matchedRuleForFactCheck?.bannedTerms || (ruleId === "R-12" ? ["fastest", "best", "number one", "#1", "greatest", "unbeatable"] : []);
+
+      // R-12 verification: only true superlatives matched as whole words are allowed.
+      // Ordinary positive adjectives such as "great", "good", "nice", "fast", "amazing" must never be flagged.
+      if (ruleId === "R-12") {
+        const hasTrueSuperlative = bannedList.some(term => {
+          const reg = buildBannedTermRegex(term);
+          return reg ? reg.test(quote) : false;
+        });
+        if (!hasTrueSuperlative) {
+          rejectionReasons.push(`"${quote}" is not a recognized superlative claim for rule R-12 (ordinary positive adjectives like great, good, nice, fast, amazing are not superlatives)`);
+        }
+      }
+
       if (isTermBackedByFact(quote, facts, bannedList)) {
         rejectionReasons.push(`Claim "${quote}" is backed by an approved fact in the library`);
       }
@@ -1006,7 +1019,13 @@ export function validateFindings(
     let fixRejected = false;
     let fixRejectionReason = null;
 
-    if (ruleId === "SEC-01" || finding.action === "remove" || suggestedFix === "Remove this phrase") {
+    if (ruleId === "R-12") {
+      action = "remove";
+      suggestedFix = "Remove this phrase";
+      finding.action = "remove";
+      finding.suggested_fix = "Remove this phrase";
+      needsHumanJudgement = false;
+    } else if (ruleId === "SEC-01" || finding.action === "remove" || suggestedFix === "Remove this phrase") {
       action = "remove";
       if (ruleId === "SEC-01") {
         suggestedFix = "";
