@@ -2110,4 +2110,79 @@ describe("Round 3: Removal, Security, Design Fixes & Certificate Verification", 
     }
   });
 
+  // Test 40: deterministic fallback for R-15 (guarantee claims) without Gemini
+  test("deterministic fallback for R-15 (guarantee claims) detects terms without Gemini and on call failure", async () => {
+    // 1. Direct validation with empty model findings: detects all 4 phrases case-insensitively
+    const text = "CampusPro provides Guaranteed results with a 100% money-back Guarantee and 100 percent satisfaction.";
+    const result = validateFindings(
+      text,
+      [],
+      INITIAL_RULES,
+      INITIAL_FACTS,
+      INITIAL_BRAND_TERMS,
+      "Social Media / Twitter"
+    );
+
+    const r15Findings = result.accepted.filter(f => f.rule_id === "R-15");
+    assert.equal(r15Findings.length, 4, "Must detect all 4 guarantee terms: Guaranteed, 100%, Guarantee, 100 percent");
+
+    const quotes = r15Findings.map(f => f.quote);
+    assert.ok(quotes.includes("Guaranteed"), "Must match 'Guaranteed'");
+    assert.ok(quotes.includes("100%"), "Must match '100%'");
+    assert.ok(quotes.includes("Guarantee"), "Must match 'Guarantee'");
+    assert.ok(quotes.includes("100 percent"), "Must match '100 percent'");
+
+    for (const f of r15Findings) {
+      assert.equal(f.rule_id, "R-15");
+      assert.equal(f.action, "remove");
+      assert.equal(f.suggested_fix, "Remove this phrase");
+      assert.equal(text.slice(f.start, f.end), f.quote, "Start and end must match quote in text");
+    }
+
+    // 2. Integration check: when Gemini review call fails or times out, R-15 finding still created
+    const origFetch = global.fetch;
+    global.fetch = async () => {
+      throw new Error("Simulated network timeout/failure calling Gemini");
+    };
+
+    try {
+      const wsId = `ws-r15-fallback-${Date.now()}`;
+      const draftText = "CampusPro is 100% guaranteed for every university.";
+
+      // Create draft
+      const draftRes = await invokeApp({
+        method: "POST",
+        url: "/api/drafts",
+        headers: { "Content-Type": "application/json", "x-workspace-id": wsId },
+        body: { title: "R-15 Fallback Draft", channel: "Social Media / Twitter", content: draftText }
+      });
+      const draftData = await draftRes.json();
+      assert.equal(draftRes.status, 201);
+
+      // Review draft when Gemini call fails
+      const reviewRes = await invokeApp({
+        method: "POST",
+        url: "/api/review",
+        headers: { "Content-Type": "application/json", "x-workspace-id": wsId },
+        body: {
+          draftId: draftData.id,
+          draftText: draftText,
+          channel: "Social Media / Twitter"
+        }
+      });
+      assert.equal(reviewRes.status, 200);
+      const reviewPayload = await reviewRes.json();
+
+      // Deterministic R-15 finding must still be present
+      const r15InReview = reviewPayload.findings.filter(f => f.rule_id === "R-15");
+      assert.ok(r15InReview.length >= 1, "R-15 finding must be present even when Gemini call fails");
+      const matchedQuotes = r15InReview.map(f => f.quote.toLowerCase());
+      assert.ok(matchedQuotes.includes("100%"), "Must detect 100%");
+      assert.ok(matchedQuotes.includes("guaranteed"), "Must detect guaranteed");
+      assert.equal(reviewPayload.aiReviewFailed, true, "Review must indicate AI review failed");
+    } finally {
+      global.fetch = origFetch;
+    }
+  });
+
 });

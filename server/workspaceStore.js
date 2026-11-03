@@ -129,7 +129,7 @@ export function loadWorkspace(workspaceId) {
         if (!rule.bannedTerms && initRule && initRule.bannedTerms) {
           rule.bannedTerms = [...initRule.bannedTerms];
         }
-        if (rule.id === "R-12" && initRule && initRule.bannedTerms) {
+        if ((rule.id === "R-12" || rule.id === "R-15") && initRule && initRule.bannedTerms) {
           rule.bannedTerms = [...initRule.bannedTerms];
         }
       }

@@ -166,22 +166,33 @@ export function runDeterministicBannedTermChecks(draftText, rules = [], facts = 
   const findings = [];
 
   for (const rule of rules) {
-    if (!rule || !Array.isArray(rule.bannedTerms) || rule.bannedTerms.length === 0) {
-      continue;
-    }
+    if (!rule) continue;
 
     const ruleId = (rule.id || "").trim().toUpperCase();
     const isR12 = ruleId === "R-12";
+    const isR15 = ruleId === "R-15";
     const isR07 = ruleId === "R-07";
     const isSuperlative = isR12 || (rule.category === "claim" && /superlative/i.test(rule.text || ""));
 
-    for (const term of rule.bannedTerms) {
+    let bannedTerms = Array.isArray(rule.bannedTerms) && rule.bannedTerms.length > 0 ? [...rule.bannedTerms] : [];
+    if (isR15 && bannedTerms.length === 0) {
+      bannedTerms = ["guaranteed", "guarantee", "100%", "100 percent"];
+    }
+    if (isR12 && bannedTerms.length === 0) {
+      bannedTerms = ["fastest", "best", "number one", "#1", "greatest", "unbeatable"];
+    }
+
+    if (bannedTerms.length === 0) {
+      continue;
+    }
+
+    for (const term of bannedTerms) {
       if (!term || typeof term !== "string") continue;
       const trimmedTerm = term.trim();
       if (!trimmedTerm) continue;
 
-      // Skip if term is backed by an approved fact in the library
-      if (isTermBackedByFact(trimmedTerm, facts, rule.bannedTerms)) {
+      // Skip if term is backed by an approved fact in the library (e.g. for R-12 superlatives)
+      if ((isR12 || isSuperlative) && isTermBackedByFact(trimmedTerm, facts, bannedTerms)) {
         continue;
       }
 
@@ -201,7 +212,7 @@ export function runDeterministicBannedTermChecks(draftText, rules = [], facts = 
         if (isR07 || trimmedTerm.toLowerCase() === "kids") {
           suggestedFix = "students";
           action = "replace";
-        } else if (isSuperlative) {
+        } else if (isSuperlative || isR15) {
           suggestedFix = "Remove this phrase";
           action = "remove";
         } else if (rule.suggestedFix) {
@@ -212,6 +223,8 @@ export function runDeterministicBannedTermChecks(draftText, rules = [], facts = 
         let explanation = "";
         if (isR12 || isSuperlative) {
           explanation = `"${capturedQuote}" is a superlative claim. Rule ${rule.id} bans superlatives unless backed by an approved fact.`;
+        } else if (isR15) {
+          explanation = `"${capturedQuote}" is a guarantee claim. Rule ${rule.id} bans guarantee claims about results.`;
         } else if (isR07) {
           explanation = `Rule ${rule.id} requires using "students" instead of "${capturedQuote}".`;
         } else {
@@ -222,7 +235,7 @@ export function runDeterministicBannedTermChecks(draftText, rules = [], facts = 
           id: `deterministic-banned-${rule.id}-${start}`,
           rule_id: rule.id,
           quote: capturedQuote,
-          category: rule.category || (isSuperlative ? "claim" : "terminology"),
+          category: rule.category || (isSuperlative || isR15 ? "claim" : "terminology"),
           severity: rule.severity || "high",
           explanation,
           suggested_fix: suggestedFix,
@@ -932,7 +945,7 @@ export function validateFindings(
         }
       }
 
-      if (isTermBackedByFact(quote, facts, bannedList)) {
+      if (ruleId === "R-12" && isTermBackedByFact(quote, facts, bannedList)) {
         rejectionReasons.push(`Claim "${quote}" is backed by an approved fact in the library`);
       }
     }

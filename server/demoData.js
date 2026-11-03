@@ -21,7 +21,8 @@ export const INITIAL_RULES = [
     id: "R-15",
     category: "claim",
     text: "No guarantees ('guaranteed', '100%') about results.",
-    severity: "high"
+    severity: "high",
+    bannedTerms: ["guaranteed", "guarantee", "100%", "100 percent"]
   },
   {
     id: "T-03",
