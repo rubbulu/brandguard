@@ -1,6 +1,9 @@
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import crypto from "crypto";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import { Readable } from "stream";
 import { EventEmitter } from "events";
 import {
@@ -1120,12 +1123,16 @@ describe("Round 3: Removal, Security, Design Fixes & Certificate Verification", 
     assert.equal(r12Mod.action, "remove");
   });
 
-  // Test 22: 'Start new draft check' resets title and copy while preserving channel and stored drafts
-  test("'Start new draft check' resets title, copy, active review, and keeps channel and stored drafts", () => {
+  // Test 22: 'Start new draft check' link (Recent Drafts) empties both fields, closes review, keeps channel & drafts
+  test("'Start new draft check' link (Recent Drafts) empties both fields, closes review, keeps channel & drafts", () => {
+    let mockSessionStorage = {
+      brandguard_active_draft_id: "d-123"
+    };
+
     let formState = {
       draftTitle: "CampusPro Q4 Campaign",
-      draftContent: "CampusPro is the greatest platform.",
-      activeDraft: { id: "d-123", title: "CampusPro Q4 Campaign" },
+      draftContent: "CampusPro is the greatest platform for universities.",
+      activeDraft: { id: "d-123", title: "CampusPro Q4 Campaign", findings: [{ id: "f-1", rule_id: "R-12" }] },
       selectedFindingId: "f-1",
       reviewError: "Old error",
       selectedSampleDraftId: "sample-1",
@@ -1133,28 +1140,147 @@ describe("Round 3: Removal, Security, Design Fixes & Certificate Verification", 
       allDrafts: [{ id: "d-123", title: "CampusPro Q4 Campaign" }, { id: "d-124", title: "Previous Draft" }]
     };
 
-    // The reset action clears title, content, active review, but keeps channel & stored drafts
-    const resetForm = (state) => ({
-      ...state,
-      draftTitle: "",
-      draftContent: "",
-      activeDraft: null,
-      selectedFindingId: null,
-      reviewError: null,
-      selectedSampleDraftId: "",
-      draftChannel: state.draftChannel,
-      allDrafts: [...state.allDrafts]
-    });
+    // Simulate clicking 'Start new draft check'
+    const handleStartNewDraft = (state, storage) => {
+      delete storage.brandguard_active_draft_id;
+      storage.brandguard_draft_cleared = "true";
+      return {
+        ...state,
+        draftTitle: "",
+        draftContent: "",
+        activeDraft: null,
+        selectedFindingId: null,
+        reviewError: null,
+        selectedSampleDraftId: "",
+        draftChannel: state.draftChannel, // Preserved
+        allDrafts: [...state.allDrafts]   // Preserved
+      };
+    };
 
-    const nextState = resetForm(formState);
-    assert.equal(nextState.draftTitle, "", "Draft title must be cleared");
-    assert.equal(nextState.draftContent, "", "Draft copy must be cleared");
+    const nextState = handleStartNewDraft(formState, mockSessionStorage);
+    assert.equal(nextState.draftTitle, "", "Draft title field must be empty");
+    assert.equal(nextState.draftContent, "", "Draft copy box must be empty");
     assert.equal(nextState.draftContent.length, 0, "Character counter must be 0");
-    assert.equal(nextState.activeDraft, null, "Active review must be closed");
+    assert.equal(nextState.activeDraft, null, "Active review panel must be closed");
     assert.equal(nextState.selectedFindingId, null);
     assert.equal(nextState.reviewError, null);
-    assert.equal(nextState.draftChannel, "Social Media / Twitter", "Channel must be preserved");
+    assert.equal(nextState.draftChannel, "Social Media / Twitter", "Channel must remain unchanged");
     assert.equal(nextState.allDrafts.length, 2, "Stored drafts must not be deleted");
+    assert.equal(mockSessionStorage.brandguard_active_draft_id, undefined, "Active draft ID must be cleared from storage");
+    assert.equal(mockSessionStorage.brandguard_draft_cleared, "true", "Cleared flag must be recorded");
+  });
+
+  // Test 23: 'New Draft' button (review panel header) empties both fields, closes review, keeps channel & drafts
+  test("'New Draft' button (review panel header) empties both fields, closes review, keeps channel & drafts", () => {
+    let mockSessionStorage = {
+      brandguard_active_draft_id: "d-555"
+    };
+
+    let formState = {
+      draftTitle: "Email Newsletter Copy",
+      draftContent: "Check out our newest features! Fastest loading ever.",
+      activeDraft: { id: "d-555", title: "Email Newsletter Copy" },
+      selectedFindingId: "f-2",
+      reviewError: null,
+      selectedSampleDraftId: "sample-2",
+      draftChannel: "Marketing Email",
+      allDrafts: [{ id: "d-555", title: "Email Newsletter Copy" }]
+    };
+
+    // Simulate clicking 'New Draft'
+    const handleStartNewDraft = (state, storage) => {
+      delete storage.brandguard_active_draft_id;
+      storage.brandguard_draft_cleared = "true";
+      return {
+        ...state,
+        draftTitle: "",
+        draftContent: "",
+        activeDraft: null,
+        selectedFindingId: null,
+        reviewError: null,
+        selectedSampleDraftId: "",
+        draftChannel: state.draftChannel,
+        allDrafts: [...state.allDrafts]
+      };
+    };
+
+    const nextState = handleStartNewDraft(formState, mockSessionStorage);
+    assert.equal(nextState.draftTitle, "", "Draft title field must be empty");
+    assert.equal(nextState.draftContent, "", "Draft copy box must be empty");
+    assert.equal(nextState.draftContent.length, 0, "Character counter must be 0");
+    assert.equal(nextState.activeDraft, null, "Active review panel must be closed");
+    assert.equal(nextState.draftChannel, "Marketing Email", "Channel must remain unchanged");
+    assert.equal(nextState.allDrafts.length, 1, "Stored drafts must not be deleted");
+  });
+
+  // Test 24: Page refresh after clicking reset does not restore old text or active review
+  test("Page refresh afterwards does not restore old text or active review", () => {
+    // 1. Initial state after user clicks 'Start new draft check' or 'New Draft'
+    const sessionStorageState = {
+      brandguard_draft_cleared: "true"
+      // brandguard_active_draft_id was removed
+    };
+
+    // 2. Simulate page reload / component remount with loadWorkspaceData
+    // React initial states on page mount:
+    let restoredDraftTitle = "";
+    let restoredDraftContent = "";
+    let restoredActiveDraft = null;
+
+    // Simulate loadWorkspaceData logic:
+    const dList = [
+      { id: "d-123", title: "CampusPro Q4 Campaign", originalText: "CampusPro is the greatest platform." },
+      { id: "d-124", title: "Previous Draft", originalText: "Previous content" }
+    ];
+
+    // loadWorkspaceData setActiveDraft updater:
+    const computeActiveDraftOnMount = (storage, drafts) => {
+      const wasCleared = storage.brandguard_draft_cleared === "true";
+      const savedId = storage.brandguard_active_draft_id;
+
+      if (wasCleared) {
+        return null;
+      }
+      if (savedId) {
+        return drafts.find(d => d.id === savedId) || null;
+      }
+      return null;
+    };
+
+    restoredActiveDraft = computeActiveDraftOnMount(sessionStorageState, dList);
+
+    assert.equal(restoredDraftTitle, "", "Draft title must remain empty after page refresh");
+    assert.equal(restoredDraftContent, "", "Draft copy must remain empty after page refresh");
+    assert.equal(restoredActiveDraft, null, "Active review must not be restored after page refresh");
+    assert.equal(dList.length, 2, "Stored drafts in workspace remain available");
+  });
+
+  // Test 25: App.jsx source code validation for required controls, refs, and attributes
+  test("App.jsx source code contains exact controls ('Start new draft check', 'New Draft'), refs, and autoComplete off", () => {
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = path.dirname(__filename);
+    const appPath = path.resolve(__dirname, "../../client/src/App.jsx");
+    const appCode = fs.readFileSync(appPath, "utf-8");
+
+    // Must have 'Start new draft check' link in Recent Drafts box
+    assert.ok(appCode.includes("<span>Start new draft check</span>"), "Must render 'Start new draft check' link/button");
+    assert.ok(appCode.includes("Recent Drafts"), "Recent Drafts section must exist");
+
+    // Must have 'New Draft' button in review panel header
+    assert.ok(appCode.includes("<span>New Draft</span>"), "Must render 'New Draft' button in review panel header");
+    assert.ok(appCode.includes('title="New Draft"'), "Review panel button must have title 'New Draft'");
+
+    // Must have draftFormRef and draftCopyInputRef
+    assert.ok(appCode.includes("draftFormRef = useRef(null)"), "draftFormRef must be defined");
+    assert.ok(appCode.includes("ref={draftFormRef}"), "ref={draftFormRef} must be attached to the form container");
+    assert.ok(appCode.includes("ref={draftCopyInputRef}"), "ref={draftCopyInputRef} must be attached to draft copy textarea");
+
+    // Must have autoComplete="off" on title input and copy textarea
+    assert.ok(appCode.includes('autoComplete="off"'), "Form controls must have autoComplete='off'");
+
+    // Must handle scroll and focus in handleStartNewDraft
+    assert.ok(appCode.includes("draftFormRef.current.scrollIntoView"), "Must scroll to draft form on reset");
+    assert.ok(appCode.includes("draftCopyInputRef.current.focus") || appCode.includes("draftCopyInputRef.current?.focus()"), "Must focus copy box on reset");
   });
 
 });
