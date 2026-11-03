@@ -5060,9 +5060,16 @@ export default function App() {
                           <span className="text-[10px] font-bold text-emerald-800 uppercase tracking-wider block mb-1.5">
                             Proposed Final Copy (Reflecting Accepted &amp; Edited Fixes)
                           </span>
-                          <p className="text-sm font-medium text-emerald-950 whitespace-pre-wrap leading-relaxed">
-                            {activeDraft.currentText}
-                          </p>
+                          {activeDraft.currentText && activeDraft.currentText.trim() ? (
+                            <p className="text-sm font-medium text-emerald-950 whitespace-pre-wrap leading-relaxed">
+                              {activeDraft.currentText}
+                            </p>
+                          ) : (
+                            <p className="text-xs font-semibold text-amber-800 bg-amber-50 p-2.5 rounded-lg border border-amber-200 flex items-center gap-1.5">
+                              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                              <span>The copy is empty and cannot be certified.</span>
+                            </p>
+                          )}
                         </div>
 
                         {/* Design changes required list (showing accepted design fixes V-01 to V-04) */}
@@ -5844,7 +5851,11 @@ export default function App() {
                                 </span>
                                 <span className="text-slate-700">
                                   {isRemoval ? (
-                                    <>Removed <strong className="text-red-700">"{f.quote}"</strong></>
+                                    f.status === "rejected" ? (
+                                      <>Kept (override): <strong className="text-amber-800">"{f.quote}"</strong></>
+                                    ) : (
+                                      <>Removed <strong className="text-red-700">"{f.quote}"</strong></>
+                                    )
                                   ) : (
                                     <>Replaced <strong className="text-red-700">"{f.quote}"</strong> &rarr; <strong className="text-emerald-700">"{f.suggested_fix}"</strong></>
                                   )}
@@ -5886,6 +5897,14 @@ export default function App() {
                       />
                     </div>
 
+                    {/* Notice if draft copy is empty and cannot be certified */}
+                    {(!activeDraft.currentText || !activeDraft.currentText.trim()) && !activeDraft.isVisual && (
+                      <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-800 flex items-center gap-2 font-medium">
+                        <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                        <span>The copy is empty and cannot be certified.</span>
+                      </div>
+                    )}
+
                     {/* Decision Controls: Approve or Request Changes */}
                     {activeDraft?.findings?.some(f => (f.rule_id === "SEC-01" || f.source === "security") && (f.status === "pending" || !f.status)) && (
                       <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 flex items-center gap-2 font-medium">
@@ -5896,9 +5915,19 @@ export default function App() {
                     <div className="flex items-center gap-3 pt-3 border-t border-slate-100">
                       <button
                         onClick={() => handleReviewerDecision("approve")}
-                        disabled={isSubmittingDecision || activeDraft?.findings?.some(f => (f.rule_id === "SEC-01" || f.source === "security") && (f.status === "pending" || !f.status))}
+                        disabled={
+                          isSubmittingDecision ||
+                          ((!activeDraft.currentText || !activeDraft.currentText.trim()) && !activeDraft.isVisual) ||
+                          activeDraft?.findings?.some(f => (f.rule_id === "SEC-01" || f.source === "security") && (f.status === "pending" || !f.status))
+                        }
                         className="flex-1 py-2 px-4 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all shadow-2xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                        title={activeDraft?.findings?.some(f => (f.rule_id === "SEC-01" || f.source === "security") && (f.status === "pending" || !f.status)) ? "Resolve the security finding first" : "Approve Publication"}
+                        title={
+                          ((!activeDraft.currentText || !activeDraft.currentText.trim()) && !activeDraft.isVisual)
+                            ? "The copy is empty and cannot be certified"
+                            : (activeDraft?.findings?.some(f => (f.rule_id === "SEC-01" || f.source === "security") && (f.status === "pending" || !f.status))
+                              ? "Resolve the security finding first"
+                              : "Approve Publication")
+                        }
                       >
                         <CheckCircle2 className="w-4 h-4" /> {isSubmittingDecision ? "Approving..." : "Approve Publication"}
                       </button>

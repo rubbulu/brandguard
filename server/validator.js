@@ -12,6 +12,7 @@
  */
 
 import { INITIAL_TONE_PROFILES } from "./demoData.js";
+import { splitSentences, detectPromptInjection } from "./securityScanner.js";
 
 const REASONING_OR_COMPLIANCE_PATTERNS = [
   /\bwait\b/i,
@@ -359,8 +360,14 @@ export function mergeFindings(findings, draftText = "") {
       continue;
     }
 
-    // Sort by quote length descending (longest span first)
-    list.sort((a, b) => (b.quote || "").length - (a.quote || "").length);
+    // Sort by quote length:
+    // For general rules: longest span first
+    // For SEC-01: narrowest span first
+    if (rId === "SEC-01") {
+      list.sort((a, b) => (a.quote || "").length - (b.quote || "").length);
+    } else {
+      list.sort((a, b) => (b.quote || "").length - (a.quote || "").length);
+    }
 
     const keptInGroup = [];
 
@@ -380,15 +387,14 @@ export function mergeFindings(findings, draftText = "") {
         const endEx = typeof existing.end === "number" ? existing.end : (typeof existing.endIndex === "number" ? existing.endIndex : -1);
 
         let isOverlapping = false;
-        let isSameBlock = false;
 
         if (startCur >= 0 && endCur >= 0 && startEx >= 0 && endEx >= 0) {
           // Merge or de-duplicate ONLY when it is the same rule on the same or overlapping text span
           isOverlapping = (startEx < endCur && startCur < endEx);
         } else if (draftText) {
           const lowerText = draftText.toLowerCase();
-          const posEx = lowerText.indexOf(exQuote);
-          const posCur = lowerText.indexOf(curQuote);
+          const posEx = startEx >= 0 ? startEx : lowerText.indexOf(exQuote);
+          const posCur = startCur >= 0 ? startCur : lowerText.indexOf(curQuote);
           if (posEx !== -1 && posCur !== -1) {
             const endPEx = posEx + exQuote.length;
             const endPCur = posCur + curQuote.length;
@@ -396,23 +402,12 @@ export function mergeFindings(findings, draftText = "") {
           }
         }
 
-        // For SEC-01: max one per text block/line
-        if (rId === "SEC-01" && draftText) {
-          const lowerText = draftText.toLowerCase();
-          const posEx = startEx >= 0 ? startEx : lowerText.indexOf(exQuote);
-          const posCur = startCur >= 0 ? startCur : lowerText.indexOf(curQuote);
-          if (posEx !== -1 && posCur !== -1) {
-            const lineStartEx = lowerText.lastIndexOf("\n", posEx);
-            const lineEndEx = lowerText.indexOf("\n", posEx);
-            const lineStartCur = lowerText.lastIndexOf("\n", posCur);
-            const lineEndCur = lowerText.indexOf("\n", posCur);
-            if (lineStartEx === lineStartCur && lineEndEx === lineEndCur) {
-              isSameBlock = true;
-            }
-          }
+        // For SEC-01: also check if one quote contains the other
+        if (!isOverlapping && rId === "SEC-01") {
+          isOverlapping = exQuote.includes(curQuote) || curQuote.includes(exQuote);
         }
 
-        if (isOverlapping || isSameBlock) {
+        if (isOverlapping) {
           // Merge current into existing
           isMerged = true;
           mergedCount++;
@@ -427,6 +422,17 @@ export function mergeFindings(findings, draftText = "") {
             mergedIntoQuote: existing.quote,
             reason: `Merged duplicate/overlapping [${rId}] finding on "${current.quote}" into "${existing.quote}".`
           });
+
+          // For SEC-01, always enforce keeping the narrowest span
+          if (rId === "SEC-01") {
+            if ((current.quote || "").length < (existing.quote || "").length) {
+              existing.quote = current.quote;
+              if (typeof current.start === "number") existing.start = current.start;
+              if (typeof current.end === "number") existing.end = current.end;
+            }
+            existing.action = "remove";
+            existing.suggested_fix = "";
+          }
 
           // Elevate severity if current was higher
           if ((severityRank[current.severity] || 1) > (severityRank[existing.severity] || 1)) {
@@ -1030,6 +1036,19 @@ export function validateFindings(
       if (ruleId === "SEC-01") {
         suggestedFix = "";
         needsHumanJudgement = true;
+        // SEC-01 must cover only the minimal injected sentence, never harmless sentences or whole draft
+        if (draftText) {
+          const sentences = splitSentences(draftText);
+          const injectedSentence = sentences.find(s => {
+            return detectPromptInjection(s.sentence).length > 0 && (
+              quote.toLowerCase().includes(s.sentence.toLowerCase()) ||
+              s.sentence.toLowerCase().includes(quote.toLowerCase())
+            );
+          });
+          if (injectedSentence && quote.length > injectedSentence.sentence.length) {
+            quote = injectedSentence.sentence;
+          }
+        }
       }
     } else if (!suggestedFix) {
       needsHumanJudgement = true;

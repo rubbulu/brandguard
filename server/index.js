@@ -1093,9 +1093,10 @@ app.post(["/api/review", "/review"], async (req, res) => {
 
     // 3. Run the deterministic Validator with workspace tone profile and brand terms
     sendStage("validator", "Validator governance & deduplication");
+    const combinedRawFindings = [...rawAiFindings, ...injectionFindings];
     const validationResult = validateFindings(
       textToReview,
-      rawAiFindings,
+      combinedRawFindings,
       req.workspace.rules,
       req.workspace.facts,
       brandTerms,
@@ -1104,8 +1105,19 @@ app.post(["/api/review", "/review"], async (req, res) => {
     );
 
     // 4. Prepend prompt injection findings (they can never be suppressed by AI verdicts)
+    // and ensure any overlapping SEC-01 findings are merged into the narrowest span
     for (const inj of injectionFindings) {
-      if (!validationResult.accepted.some(f => f.quote.toLowerCase() === inj.quote.toLowerCase())) {
+      const existingSec = validationResult.accepted.find(f => f.rule_id === "SEC-01" && (
+        f.quote.toLowerCase().includes(inj.quote.toLowerCase()) ||
+        inj.quote.toLowerCase().includes(f.quote.toLowerCase())
+      ));
+      if (existingSec) {
+        if (inj.quote.length < existingSec.quote.length) {
+          existingSec.quote = inj.quote;
+          existingSec.start = inj.start;
+          existingSec.end = inj.end;
+        }
+      } else if (!validationResult.accepted.some(f => f.quote.toLowerCase() === inj.quote.toLowerCase())) {
         validationResult.accepted.unshift(inj);
       }
     }
@@ -1502,6 +1514,12 @@ app.post("/api/drafts/:id/decision", (req, res) => {
     );
     if (secPending) {
       return res.status(400).json({ error: "Resolve the security finding first" });
+    }
+
+    // Check if final copy is empty (cannot be certified)
+    const currentCopy = (draft.currentText !== undefined ? draft.currentText : draft.originalText) || "";
+    if (!draft.isVisual && (!currentCopy || !currentCopy.trim())) {
+      return res.status(400).json({ error: "The copy is empty and cannot be certified." });
     }
 
     draft.status = "approved";

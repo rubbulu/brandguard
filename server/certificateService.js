@@ -200,12 +200,17 @@ export function createComplianceCertificate({
   const approvedAt = new Date().toISOString();
 
   // Final text computation: uses recomputeDraftText to ensure all accepted copy & SEC-01 removals are applied
+  const hasFindings = Array.isArray(draft.findings) && draft.findings.length > 0;
+  const recomputed = hasFindings ? recomputeDraftText(draft.originalText, draft.findings) : null;
   const finalText = (
-    recomputeDraftText(draft.originalText, draft.findings || []) ||
-    draft.currentText ||
-    draft.originalText ||
-    ""
+    typeof recomputed === "string" ? recomputed : (typeof draft.currentText === "string" ? draft.currentText : (draft.originalText || ""))
   ).trim();
+
+  if (!draft.isVisual && (!finalText || !finalText.trim())) {
+    const emptyErr = new Error("The copy is empty and cannot be certified.");
+    emptyErr.code = "EMPTY_COPY";
+    throw emptyErr;
+  }
 
   const finalTextHash = crypto.createHash("sha256").update(finalText).digest("hex");
   const originalText = (draft.originalText || "").trim();
