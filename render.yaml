@@ -6,8 +6,6 @@ services:
     buildCommand: npm run build
     startCommand: npm start
     envVars:
-      - key: PORT
-        value: 5000
       - key: NODE_ENV
         value: production
       - key: GEMINI_API_KEY
@@ -16,3 +14,5 @@ services:
         value: gemini-flash-lite-latest
       - key: CERT_SECRET
         sync: false
+      - key: PORT
+        value: 5000
