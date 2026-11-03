@@ -3615,7 +3615,19 @@ export default function App() {
                             {rule.category}
                           </span>
                         </td>
-                        <td className="py-3 px-4 text-slate-800 font-medium">{rule.text}</td>
+                        <td className="py-3 px-4 text-slate-800 font-medium">
+                          <div>{rule.text}</div>
+                          {Array.isArray(rule.bannedTerms) && rule.bannedTerms.length > 0 && (
+                            <div className="mt-1 flex flex-wrap gap-1 items-center">
+                              <span className="text-[10px] text-slate-400 font-normal">Banned terms:</span>
+                              {rule.bannedTerms.map((term, tIdx) => (
+                                <span key={tIdx} className="font-mono text-[10px] px-1.5 py-0.2 bg-red-50 text-red-700 border border-red-200 rounded">
+                                  {term}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </td>
                         <td className="py-3 px-4">
                           <span
                             className={`px-2 py-0.5 rounded-full text-[10px] font-bold capitalize ${
@@ -5142,12 +5154,38 @@ export default function App() {
                     <span className="text-xs text-slate-500">Click card to highlight</span>
                   </div>
 
-                  {(!activeDraft.findings || activeDraft.findings.length === 0) && !isOcrFailed && !hasZeroLines && (
+                  {activeDraft.aiReviewFailed && (
+                    <div className="p-3.5 bg-amber-50 border border-amber-300 rounded-xl flex items-start gap-3 text-amber-900 mb-3" data-testid="ai-unavailable-notice">
+                      <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                      <div>
+                        <h4 className="font-bold text-xs text-amber-900">
+                          AI review unavailable: {activeDraft.aiUnavailableReason || "Gemini unavailable"}. Only code-based checks ran.
+                        </h4>
+                        <p className="text-[11px] text-amber-700 mt-0.5">
+                          Findings below were evaluated using deterministic code checks. This draft cannot be certified as fully compliant without complete AI review.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {(!activeDraft.findings || activeDraft.findings.length === 0) && !isOcrFailed && !hasZeroLines && !activeDraft.aiReviewFailed && (
                     <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center">
                       <CheckCircle2 className="w-10 h-10 text-emerald-500 mx-auto mb-2" />
                       <h4 className="font-bold text-slate-800 text-sm">No Compliance Issues Detected</h4>
                       <p className="text-xs text-slate-500 mt-1">
                         Draft complies with all active brand guidelines, visual rules, and verified facts.
+                      </p>
+                    </div>
+                  )}
+
+                  {(!activeDraft.findings || activeDraft.findings.length === 0) && !isOcrFailed && !hasZeroLines && activeDraft.aiReviewFailed && (
+                    <div className="bg-white rounded-2xl border border-amber-200 bg-amber-50/40 p-8 text-center">
+                      <AlertTriangle className="w-10 h-10 text-amber-500 mx-auto mb-2" />
+                      <h4 className="font-bold text-slate-800 text-sm text-amber-900">
+                        AI review unavailable: {activeDraft.aiUnavailableReason || "Gemini unavailable"}. Only code-based checks ran.
+                      </h4>
+                      <p className="text-xs text-slate-600 mt-1">
+                        No issues were flagged by deterministic code checks, but AI review could not be completed. Draft cannot be certified as fully compliant.
                       </p>
                     </div>
                   )}
@@ -5331,7 +5369,7 @@ export default function App() {
                                     {finding.fix_rejection_reason || "Auto-fix was rejected for ungrammatical outcome. Please edit manually."}
                                   </p>
                                 </div>
-                              ) : (!finding.suggested_fix || finding.suggested_fix.trim() === "" || finding.action === "remove" || finding.rule_id === "SEC-01") ? (
+                              ) : (!finding.suggested_fix || finding.suggested_fix.trim() === "" || finding.suggested_fix === "Remove this phrase" || finding.action === "remove" || finding.rule_id === "SEC-01") ? (
                                 <p className="text-xs font-semibold text-rose-800 flex items-center gap-1.5">
                                   <Trash2 className="w-3.5 h-3.5 text-rose-600 shrink-0" />
                                   <span>Remove this phrase</span>
@@ -5585,6 +5623,20 @@ export default function App() {
                       return null;
                     })()}
 
+                    {activeDraft.aiReviewFailed && (
+                      <div className="p-3.5 bg-amber-50 border border-amber-300 rounded-xl flex items-start gap-3 text-amber-900 mb-4" data-testid="reviewer-ai-unavailable-notice">
+                        <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                        <div>
+                          <h4 className="font-bold text-xs text-amber-900">
+                            AI review unavailable: {activeDraft.aiUnavailableReason || "Gemini unavailable"}. Only code-based checks ran.
+                          </h4>
+                          <p className="text-[11px] text-amber-700 mt-0.5">
+                            This draft was evaluated using deterministic code checks only. Generated compliance certificate will reflect "Reviewed by code checks only".
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
                     <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                       <div>
                         <h2 className="text-lg font-bold text-slate-900">{activeDraft.title}</h2>
@@ -5774,7 +5826,9 @@ export default function App() {
                           </div>
                           <div>
                             <span className="text-xs font-bold text-emerald-950 block flex items-center gap-1.5">
-                              Compliance Certificate Issued
+                              {activeDraft.certificate.status === "Reviewed by code checks only"
+                                ? "Reviewed by Code Checks Only"
+                                : (activeDraft.certificate.status || "Compliance Certificate Issued")}
                               <span className="text-[10px] font-normal px-1.5 py-0.2 rounded-full bg-emerald-200 text-emerald-800">
                                 v{activeDraft.certificate.version}
                               </span>

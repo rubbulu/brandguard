@@ -150,7 +150,7 @@ export function recomputeDraftText(originalText, findings = []) {
       usedOffsets.add(start);
 
       let replacementText = "";
-      if (f.action === "remove" || !f.suggested_fix || f.suggested_fix.trim() === "" || f.rule_id === "SEC-01") {
+      if (f.action === "remove" || !f.suggested_fix || f.suggested_fix.trim() === "" || f.suggested_fix === "Remove this phrase" || f.rule_id === "SEC-01") {
         replacementText = "";
       } else if (f.suggested_fix && f.suggested_fix !== "Needs manual edit") {
         replacementText = f.suggested_fix;
@@ -215,7 +215,10 @@ export function createComplianceCertificate({
   const findings = draft.findings || [];
   const secFinding = findings.find(f => f.rule_id === "SEC-01" || f.source === "security");
   const isSecOverridden = secFinding && secFinding.status === "rejected";
-  const status = isSecOverridden ? "Issued with override" : "Compliant";
+  const isCodeOnly = Boolean(draft.aiReviewFailed);
+  const status = isSecOverridden
+    ? "Issued with override"
+    : (isCodeOnly ? "Reviewed by code checks only" : "Compliant");
   const securityOverride = isSecOverridden ? "Security finding overridden by creator" : null;
 
   // Tone profile channel

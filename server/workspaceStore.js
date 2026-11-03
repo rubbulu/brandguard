@@ -123,6 +123,15 @@ export function loadWorkspace(workspaceId) {
         const t06Rule = INITIAL_RULES.find(r => r.id === "T-06");
         if (t06Rule) data.rules.push({ ...t06Rule });
       }
+      // Ensure bannedTerms are populated from INITIAL_RULES if missing
+      for (const rule of data.rules) {
+        if (!rule.bannedTerms) {
+          const initRule = INITIAL_RULES.find(r => r.id === rule.id);
+          if (initRule && initRule.bannedTerms) {
+            rule.bannedTerms = [...initRule.bannedTerms];
+          }
+        }
+      }
       if (!Array.isArray(data.facts)) data.facts = JSON.parse(JSON.stringify(INITIAL_FACTS));
       if (!Array.isArray(data.drafts)) data.drafts = [];
       if (!data.visualSettings) data.visualSettings = JSON.parse(JSON.stringify(INITIAL_VISUAL_SETTINGS));

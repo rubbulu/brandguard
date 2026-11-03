@@ -101,6 +101,146 @@ export function isTermPhraseRule(ruleId, rules = [], quote = "") {
 }
 
 /**
+ * Builds a word-boundary regex for a banned term, handling symbols like #1 and multi-word terms.
+ */
+export function buildBannedTermRegex(term) {
+  if (!term || typeof term !== "string") return null;
+  const trimmed = term.trim();
+  if (!trimmed) return null;
+
+  // Split multi-word terms to allow flexible whitespace
+  const words = trimmed.split(/\s+/).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const pattern = words.join("\\s+");
+
+  const startsWithWord = /^\w/.test(trimmed);
+  const endsWithWord = /\w$/.test(trimmed);
+
+  const prefix = startsWithWord ? "\\b" : "(?:^|[^\\w#])";
+  const suffix = endsWithWord ? "\\b" : "(?:$|[^\\w#])";
+
+  return new RegExp(`${prefix}(${pattern})${suffix}`, "gi");
+}
+
+/**
+ * Checks if a term or phrase is backed by an approved fact in the library.
+ */
+export function isTermBackedByFact(termOrPhrase, facts = [], bannedTerms = []) {
+  if (!termOrPhrase || !Array.isArray(facts) || facts.length === 0) return false;
+
+  const phraseStr = typeof termOrPhrase === "string" ? termOrPhrase.trim() : "";
+  if (!phraseStr) return false;
+
+  let termsToCheck = [];
+  if (Array.isArray(bannedTerms) && bannedTerms.length > 0) {
+    termsToCheck = bannedTerms.filter(t => {
+      const reg = buildBannedTermRegex(t);
+      return reg ? reg.test(phraseStr) : false;
+    });
+  }
+  if (termsToCheck.length === 0) {
+    termsToCheck = [phraseStr];
+  }
+
+  return termsToCheck.some(t => {
+    const reg = buildBannedTermRegex(t);
+    if (!reg) return false;
+    return facts.some(fact => {
+      const text = typeof fact === "string" ? fact : (fact && fact.text ? fact.text : "");
+      if (!text) return false;
+      reg.lastIndex = 0;
+      return reg.test(text);
+    });
+  });
+}
+
+/**
+ * Deterministic safety net for term-based rules in the library
+ * (e.g. R-12 superlatives and R-07 terminology).
+ */
+export function runDeterministicBannedTermChecks(draftText, rules = [], facts = []) {
+  if (!draftText || typeof draftText !== "string" || !Array.isArray(rules) || rules.length === 0) {
+    return [];
+  }
+
+  const findings = [];
+
+  for (const rule of rules) {
+    if (!rule || !Array.isArray(rule.bannedTerms) || rule.bannedTerms.length === 0) {
+      continue;
+    }
+
+    const ruleId = (rule.id || "").trim().toUpperCase();
+    const isR12 = ruleId === "R-12";
+    const isR07 = ruleId === "R-07";
+    const isSuperlative = isR12 || (rule.category === "claim" && /superlative/i.test(rule.text || ""));
+
+    for (const term of rule.bannedTerms) {
+      if (!term || typeof term !== "string") continue;
+      const trimmedTerm = term.trim();
+      if (!trimmedTerm) continue;
+
+      // Skip if term is backed by an approved fact in the library
+      if (isTermBackedByFact(trimmedTerm, facts, rule.bannedTerms)) {
+        continue;
+      }
+
+      const regex = buildBannedTermRegex(trimmedTerm);
+      if (!regex) continue;
+
+      let match;
+      while ((match = regex.exec(draftText)) !== null) {
+        const capturedQuote = match[1] || match[0];
+        const offsetInMatch = match[0].indexOf(capturedQuote);
+        const start = match.index + (offsetInMatch >= 0 ? offsetInMatch : 0);
+        const end = start + capturedQuote.length;
+
+        let suggestedFix = "Remove this phrase";
+        let action = "remove";
+
+        if (isR07 || trimmedTerm.toLowerCase() === "kids") {
+          suggestedFix = "students";
+          action = "replace";
+        } else if (isSuperlative) {
+          suggestedFix = "Remove this phrase";
+          action = "remove";
+        } else if (rule.suggestedFix) {
+          suggestedFix = rule.suggestedFix;
+          action = "replace";
+        }
+
+        let explanation = "";
+        if (isR12 || isSuperlative) {
+          explanation = `"${capturedQuote}" is a superlative claim. Rule ${rule.id} bans superlatives unless backed by an approved fact.`;
+        } else if (isR07) {
+          explanation = `Rule ${rule.id} requires using "students" instead of "${capturedQuote}".`;
+        } else {
+          explanation = `Rule ${rule.id} restricts the use of "${capturedQuote}".`;
+        }
+
+        findings.push({
+          id: `deterministic-banned-${rule.id}-${start}`,
+          rule_id: rule.id,
+          quote: capturedQuote,
+          category: rule.category || (isSuperlative ? "claim" : "terminology"),
+          severity: rule.severity || "high",
+          explanation,
+          suggested_fix: suggestedFix,
+          action,
+          needs_human_judgement: false,
+          source: "deterministic",
+          start,
+          end,
+          startIndex: start,
+          endIndex: end
+        });
+      }
+    }
+  }
+
+  return findings;
+}
+
+/**
  * Detects obvious ungrammatical patterns resulting from applying a suggested fix to draft text.
  * Examples:
  * - Leftover comparative immediately following an adjective (e.g. "Great better grades", "Good faster")
@@ -108,7 +248,7 @@ export function isTermPhraseRule(ruleId, rules = [], quote = "") {
  * - Leftover dangling comparative following the substitution point
  */
 export function validateFixGrammar(draftText, quote, suggestedFix) {
-  if (!suggestedFix || typeof suggestedFix !== "string" || !quote || typeof quote !== "string") {
+  if (!suggestedFix || typeof suggestedFix !== "string" || !quote || typeof quote !== "string" || suggestedFix === "Remove this phrase") {
     return { isGrammatical: true };
   }
 
@@ -715,16 +855,23 @@ export function validateFindings(
     profile
   );
 
+  // Run deterministic safety net for banned terms (e.g. R-12 superlatives, R-07 terminology)
+  const deterministicBannedTermFindings = runDeterministicBannedTermChecks(
+    draftText,
+    rules,
+    facts
+  );
+
   const rawList = Array.isArray(rawFindings)
     ? rawFindings
     : (rawFindings && Array.isArray(rawFindings.findings) ? rawFindings.findings : []);
-  const combinedRawFindings = [...rawList, ...deterministicToneFindings];
+  const combinedRawFindings = [...rawList, ...deterministicToneFindings, ...deterministicBannedTermFindings];
 
   const accepted = [];
   const rejected = [];
   const usedQuoteIndices = new Map();
 
-  if (rawList.length === 0 && !Array.isArray(rawFindings) && typeof rawFindings !== "object" && deterministicToneFindings.length === 0) {
+  if (rawList.length === 0 && !Array.isArray(rawFindings) && typeof rawFindings !== "object" && deterministicToneFindings.length === 0 && deterministicBannedTermFindings.length === 0) {
     return {
       accepted: [],
       rejected: [{ reason: "AI response was not a valid list of findings", raw: rawFindings }],
@@ -756,6 +903,15 @@ export function validateFindings(
       rejectionReasons.push("Missing rule_id");
     } else if (!isRuleValid) {
       rejectionReasons.push(`Rule ID "${ruleId}" does not exist in brand rules or approved facts`);
+    }
+
+    // Check if term/quote is backed by an approved fact in the library (e.g. for R-12 superlatives)
+    const matchedRuleForFactCheck = rules.find(r => r.id && r.id.trim().toUpperCase() === ruleId);
+    if (ruleId === "R-12" || (matchedRuleForFactCheck && Array.isArray(matchedRuleForFactCheck.bannedTerms))) {
+      const bannedList = matchedRuleForFactCheck?.bannedTerms || (ruleId === "R-12" ? ["fastest", "best", "number one", "#1", "greatest", "unbeatable"] : []);
+      if (isTermBackedByFact(quote, facts, bannedList)) {
+        rejectionReasons.push(`Claim "${quote}" is backed by an approved fact in the library`);
+      }
     }
 
     // T-05 check: only fire when all-caps words exceed channel limit
@@ -850,10 +1006,12 @@ export function validateFindings(
     let fixRejected = false;
     let fixRejectionReason = null;
 
-    if (ruleId === "SEC-01") {
-      suggestedFix = "";
+    if (ruleId === "SEC-01" || finding.action === "remove" || suggestedFix === "Remove this phrase") {
       action = "remove";
-      needsHumanJudgement = true;
+      if (ruleId === "SEC-01") {
+        suggestedFix = "";
+        needsHumanJudgement = true;
+      }
     } else if (!suggestedFix) {
       needsHumanJudgement = true;
     } else {
@@ -891,7 +1049,7 @@ export function validateFindings(
     } else {
       // Check if term/phrase rule (e.g. R-07 or terminology) with multiple occurrences in draftText
       const isTermRule = isTermPhraseRule(ruleId, rules, quote);
-      const occurrences = (isTermRule && draftText && quote) ? findAllTermOccurrences(draftText, quote) : [];
+      const occurrences = (isTermRule && draftText && quote && typeof finding.start !== "number") ? findAllTermOccurrences(draftText, quote) : [];
 
       if (occurrences.length > 1) {
         // Create one finding per occurrence with its own offsets

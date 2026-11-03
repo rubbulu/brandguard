@@ -410,12 +410,12 @@ export default function PublicVerifyPage({ certificateId, onBack }) {
                     className={`text-xs px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider ${
                       !isVerified
                         ? "bg-red-500/20 text-red-300 border border-red-500/30"
-                        : isOverride
+                        : isOverride || cert.status === "Reviewed by code checks only"
                         ? "bg-amber-500/20 text-amber-300 border border-amber-500/30"
                         : "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
                     }`}
                   >
-                    {!isVerified ? "Tamper Detected" : (isOverride ? "Issued with override" : "Compliant")}
+                    {!isVerified ? "Tamper Detected" : (isOverride ? "Issued with override" : (cert.status || "Compliant"))}
                   </span>
                 </div>
                 <p className="text-xs text-slate-400 mt-1">

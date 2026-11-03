@@ -54,8 +54,8 @@ export function computeRedlineChunks(originalText, finalText, findings = []) {
           start,
           end,
           quote: f.quote,
-          suggested_fix: (f.action === "remove" || f.rule_id === "SEC-01" || !f.suggested_fix) ? "" : (f.suggested_fix !== "Needs manual edit" ? f.suggested_fix : ""),
-          action: (f.action === "remove" || f.rule_id === "SEC-01" || !f.suggested_fix || f.suggested_fix.trim() === "") ? "remove" : f.action,
+          suggested_fix: (f.action === "remove" || f.suggested_fix === "Remove this phrase" || f.rule_id === "SEC-01" || !f.suggested_fix) ? "" : (f.suggested_fix !== "Needs manual edit" ? f.suggested_fix : ""),
+          action: (f.action === "remove" || f.suggested_fix === "Remove this phrase" || f.rule_id === "SEC-01" || !f.suggested_fix || f.suggested_fix.trim() === "") ? "remove" : f.action,
           rule_id: f.rule_id
         });
       }

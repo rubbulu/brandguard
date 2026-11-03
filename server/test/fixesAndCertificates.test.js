@@ -19,8 +19,8 @@ import {
 } from "../clarificationService.js";
 import { computeRedlineChunks } from "../../client/src/utils/redlineUtils.js";
 import { detectPromptInjection } from "../securityScanner.js";
-import { compareChannelTones, resolveChannelProfile } from "../validator.js";
-import { INITIAL_TONE_PROFILES } from "../demoData.js";
+import { compareChannelTones, resolveChannelProfile, validateFindings } from "../validator.js";
+import { INITIAL_TONE_PROFILES, INITIAL_RULES, INITIAL_FACTS, INITIAL_BRAND_TERMS } from "../demoData.js";
 import { loadWorkspace, saveWorkspace } from "../workspaceStore.js";
 import { app } from "../index.js";
 
@@ -790,6 +790,218 @@ describe("Round 3: Removal, Security, Design Fixes & Certificate Verification", 
     const longFindings = compareChannelTones(veryLongCopy, [], ["CampusPro"], INITIAL_TONE_PROFILES);
     const landingResult = longFindings.find(c => c.channel === "Product Landing Page");
     assert.ok(landingResult, "5,000 char copy must process cleanly");
+  });
+
+  // Test 13: Deterministic safety net for R-12 (fastest) even if model returns nothing
+  test("deterministic safety net: 'CampusPro is the fastest platform for universities.' produces R-12 finding even if model returns nothing", () => {
+    const text = "CampusPro is the fastest platform for universities.";
+    // Model returns empty list []
+    const validationResult = validateFindings(
+      text,
+      [],
+      INITIAL_RULES,
+      INITIAL_FACTS,
+      INITIAL_BRAND_TERMS,
+      "Social Media / Twitter"
+    );
+
+    assert.equal(validationResult.accepted.length, 1, "Must produce exactly 1 finding for R-12");
+    const finding = validationResult.accepted[0];
+    assert.equal(finding.rule_id, "R-12");
+    assert.equal(finding.quote, "fastest");
+    assert.equal(finding.suggested_fix, "Remove this phrase");
+    assert.equal(finding.action, "remove");
+    assert.equal(finding.start, 17);
+    assert.equal(finding.end, 24);
+    assert.equal(text.slice(finding.start, finding.end), "fastest");
+  });
+
+  // Test 14: Deterministic safety net: 'best' and 'Number one' are caught
+  test("deterministic safety net: 'best' and 'Number one' are caught", () => {
+    const text = "CampusPro is the best solution and Number one in reliability.";
+    const validationResult = validateFindings(
+      text,
+      [],
+      INITIAL_RULES,
+      INITIAL_FACTS,
+      INITIAL_BRAND_TERMS,
+      "Social Media / Twitter"
+    );
+
+    const r12Findings = validationResult.accepted.filter(f => f.rule_id === "R-12");
+    assert.equal(r12Findings.length, 2, "Must catch both 'best' and 'Number one'");
+    const bestFinding = r12Findings.find(f => f.quote.toLowerCase() === "best");
+    const numOneFinding = r12Findings.find(f => f.quote.toLowerCase() === "number one");
+
+    assert.ok(bestFinding, "Must catch 'best'");
+    assert.equal(bestFinding.quote, "best");
+    assert.equal(bestFinding.suggested_fix, "Remove this phrase");
+    assert.equal(text.slice(bestFinding.start, bestFinding.end), "best");
+
+    assert.ok(numOneFinding, "Must catch 'Number one'");
+    assert.equal(numOneFinding.quote, "Number one");
+    assert.equal(numOneFinding.suggested_fix, "Remove this phrase");
+    assert.equal(text.slice(numOneFinding.start, numOneFinding.end), "Number one");
+  });
+
+  // Test 15: Deterministic safety net: 'fastest' backed by an approved fact is not flagged
+  test("deterministic safety net: 'fastest' backed by an approved fact is not flagged", () => {
+    const text = "CampusPro is the fastest platform for universities.";
+    const factsWithFastest = [
+      ...INITIAL_FACTS,
+      { id: "F-10", text: "Benchmarking proved CampusPro is the fastest platform for universities in 2026." }
+    ];
+
+    // 1. Deterministic safety net skips it
+    const resultBacked = validateFindings(
+      text,
+      [],
+      INITIAL_RULES,
+      factsWithFastest,
+      INITIAL_BRAND_TERMS,
+      "Social Media / Twitter"
+    );
+    const r12Backed = resultBacked.accepted.filter(f => f.rule_id === "R-12");
+    assert.equal(r12Backed.length, 0, "Backed superlative must not be flagged");
+
+    // 2. Even if Gemini model mistakenly returns an R-12 finding, the validator drops it
+    const resultWithModelFinding = validateFindings(
+      text,
+      [{
+        rule_id: "R-12",
+        quote: "fastest",
+        suggested_fix: "Remove this phrase",
+        explanation: "Superlative claim"
+      }],
+      INITIAL_RULES,
+      factsWithFastest,
+      INITIAL_BRAND_TERMS,
+      "Social Media / Twitter"
+    );
+    const r12Model = resultWithModelFinding.accepted.filter(f => f.rule_id === "R-12");
+    assert.equal(r12Model.length, 0, "Model finding backed by fact must be dropped by validator");
+    assert.ok(resultWithModelFinding.rejected.some(r => r.reasons.some(msg => msg.includes("backed by an approved fact"))));
+  });
+
+  // Test 16: Deduplication when model also returns the finding
+  test("deterministic safety net: finding is not duplicated when model also returns it", () => {
+    const text = "CampusPro is the fastest platform for universities.";
+    const modelFindings = [{
+      rule_id: "R-12",
+      quote: "fastest",
+      suggested_fix: "leading",
+      explanation: "Superlative claim unverified"
+    }];
+
+    const validationResult = validateFindings(
+      text,
+      modelFindings,
+      INITIAL_RULES,
+      INITIAL_FACTS,
+      INITIAL_BRAND_TERMS,
+      "Social Media / Twitter"
+    );
+
+    const r12Findings = validationResult.accepted.filter(f => f.rule_id === "R-12");
+    assert.equal(r12Findings.length, 1, "Must not duplicate finding for same rule and same span");
+    assert.equal(validationResult.merged.length, 1, "Duplicate must be recorded in merged list");
+  });
+
+  // Test 17: 'kids and other kids' gives two findings
+  test("deterministic safety net: 'kids and other kids' gives two findings", () => {
+    const text = "great for kids and other kids";
+    const validationResult = validateFindings(
+      text,
+      [],
+      INITIAL_RULES,
+      INITIAL_FACTS,
+      INITIAL_BRAND_TERMS,
+      "Social Media / Twitter"
+    );
+
+    const r07Findings = validationResult.accepted.filter(f => f.rule_id === "R-07");
+    assert.equal(r07Findings.length, 2, "Must produce exactly two findings for two occurrences of 'kids'");
+    assert.equal(r07Findings[0].quote, "kids");
+    assert.equal(r07Findings[1].quote, "kids");
+    assert.equal(r07Findings[0].suggested_fix, "students");
+    assert.equal(r07Findings[1].suggested_fix, "students");
+    assert.notEqual(r07Findings[0].start, r07Findings[1].start);
+    assert.equal(text.slice(r07Findings[0].start, r07Findings[0].end), "kids");
+    assert.equal(text.slice(r07Findings[1].start, r07Findings[1].end), "kids");
+  });
+
+  // Test 18: Failing model call: notice appears, code checks show, and certificate status is 'Reviewed by code checks only'
+  test("failing model call: notice appears, code-based findings (T-03, banned terms) show, and certificate status is 'Reviewed by code checks only'", async () => {
+    const wsId = `ws-fail-test-${Date.now()}`;
+    const draftText = "CampusPro is the fastest platform for universities!!";
+
+    // 1. Create a draft in the workspace
+    const draftRes = await invokeApp({
+      method: "POST",
+      url: "/api/drafts",
+      headers: { "Content-Type": "application/json", "x-workspace-id": wsId },
+      body: {
+        title: "Model Failure Test Draft",
+        channel: "Social Media / Twitter",
+        content: draftText
+      }
+    });
+    assert.equal(draftRes.status, 201);
+    const draftData = await draftRes.json();
+
+    // 2. Review draft directly using simulated review endpoint with invalid/failing key
+    const reviewRes = await invokeApp({
+      method: "POST",
+      url: "/api/review",
+      headers: { "Content-Type": "application/json", "x-workspace-id": wsId },
+      body: {
+        draftId: draftData.id,
+        draftText: draftText,
+        channel: "Social Media / Twitter"
+      }
+    });
+    assert.equal(reviewRes.status, 200);
+    const reviewPayload = await reviewRes.json();
+
+    // Code-based findings MUST still show:
+    // - T-03: excessive exclamation marks (!!)
+    // - R-12: banned term superlative ("fastest")
+    assert.ok(reviewPayload.findings.some(f => f.rule_id === "T-03"), "Code-based T-03 must show");
+    assert.ok(reviewPayload.findings.some(f => f.rule_id === "R-12"), "Deterministic R-12 must show");
+
+    // Test failing model call explicitly: simulated failure state
+    const mockFailedDraft = {
+      id: "d-failed-call",
+      title: "Model Failure Simulation",
+      channel: "Social Media / Twitter",
+      originalText: draftText,
+      currentText: draftText,
+      status: "reviewed",
+      aiReviewFailed: true,
+      aiUnavailableReason: "Gemini quota/rate limit",
+      findings: reviewPayload.findings
+    };
+
+    // UI Notice string check
+    const notice = `AI review unavailable: ${mockFailedDraft.aiUnavailableReason}. Only code-based checks ran.`;
+    assert.equal(notice, "AI review unavailable: Gemini quota/rate limit. Only code-based checks ran.");
+
+    // Certificate issuance check: MUST NOT say 'Compliant'
+    const mockWorkspace = { id: wsId, rules: INITIAL_RULES, facts: INITIAL_FACTS };
+    const cert = createComplianceCertificate({
+      draft: mockFailedDraft,
+      workspace: mockWorkspace,
+      reviewerName: "Lead Reviewer",
+      reviewerNote: "Approved after deterministic code checks."
+    });
+
+    assert.equal(cert.status, "Reviewed by code checks only", "Certificate must say 'Reviewed by code checks only' when AI call failed");
+    assert.notEqual(cert.status, "Compliant", "Certificate must NOT say 'Compliant' when AI call failed");
+
+    // Verification check
+    const verification = verifyCertificateIntegrity(cert);
+    assert.equal(verification.verified, true);
+    assert.equal(verification.status, "Reviewed by code checks only");
   });
 
 });

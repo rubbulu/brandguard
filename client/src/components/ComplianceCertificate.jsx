@@ -130,7 +130,7 @@ export default function ComplianceCertificate({
             </button>
           )}
           <span className="text-sm text-slate-400 hidden sm:inline">
-            Status: <span className={isOverride ? "text-amber-400 font-semibold" : "text-emerald-400 font-semibold"}>
+            Status: <span className={isOverride || cert.status === "Reviewed by code checks only" ? "text-amber-400 font-semibold" : "text-emerald-400 font-semibold"}>
               {cert.status || "Approved"} (v{cert.version})
             </span>
           </span>

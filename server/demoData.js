@@ -7,13 +7,15 @@ export const INITIAL_RULES = [
     id: "R-12",
     category: "claim",
     text: "No superlatives (fastest, best, number one) unless backed by an approved fact.",
-    severity: "high"
+    severity: "high",
+    bannedTerms: ["fastest", "best", "number one", "#1", "greatest", "unbeatable"]
   },
   {
     id: "R-07",
     category: "terminology",
     text: "Say 'students', not 'kids'.",
-    severity: "medium"
+    severity: "medium",
+    bannedTerms: ["kids"]
   },
   {
     id: "R-15",

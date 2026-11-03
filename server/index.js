@@ -174,6 +174,10 @@ app.post("/api/rules", (req, res) => {
       : "medium"
   };
 
+  if (Array.isArray(req.body.bannedTerms)) {
+    newRule.bannedTerms = req.body.bannedTerms.map(t => String(t).trim()).filter(Boolean);
+  }
+
   req.workspace.rules.push(newRule);
   req.saveWs();
   res.status(201).json(newRule);
@@ -181,7 +185,7 @@ app.post("/api/rules", (req, res) => {
 
 app.put("/api/rules/:id", (req, res) => {
   const ruleId = req.params.id.toUpperCase();
-  const { category, text, severity } = req.body;
+  const { category, text, severity, bannedTerms } = req.body;
 
   const rule = req.workspace.rules.find(r => r.id === ruleId);
   if (!rule) {
@@ -192,6 +196,9 @@ app.put("/api/rules/:id", (req, res) => {
   if (text) rule.text = text.trim();
   if (severity && ["high", "medium", "low"].includes(severity.toLowerCase())) {
     rule.severity = severity.toLowerCase();
+  }
+  if (Array.isArray(bannedTerms)) {
+    rule.bannedTerms = bannedTerms.map(t => String(t).trim()).filter(Boolean);
   }
 
   req.saveWs();
@@ -1047,7 +1054,13 @@ app.post(["/api/review", "/review"], async (req, res) => {
     // 2. Call Gemini with cascading fallback
     let rawAiFindings = [];
     let modelUsed = ACTIVE_MODEL;
+    let aiReviewFailed = false;
+    let aiUnavailableReason = null;
+
     try {
+      if (!GEMINI_API_KEY) {
+        throw new Error("GEMINI_API_KEY is not configured.");
+      }
       const reviewResult = await callGeminiReview({
         apiKey: GEMINI_API_KEY,
         draftText: textToReview,
@@ -1056,16 +1069,20 @@ app.post(["/api/review", "/review"], async (req, res) => {
       });
       if (Array.isArray(reviewResult)) {
         rawAiFindings = reviewResult;
-      } else {
-        rawAiFindings = reviewResult.findings || [];
+      } else if (reviewResult && Array.isArray(reviewResult.findings)) {
+        rawAiFindings = reviewResult.findings;
         modelUsed = reviewResult.model || ACTIVE_MODEL;
+      } else {
+        throw new Error("failed validation: Invalid response format from Gemini");
       }
     } catch (aiErr) {
       console.warn("[Review AI Warning]: Gemini review unavailable, continuing with deterministic checks:", aiErr.message);
       rawAiFindings = [];
+      aiReviewFailed = true;
+      aiUnavailableReason = normalizeAiFailureReason(aiErr);
     }
 
-    sendStage("deterministic", "Deterministic tone checks");
+    sendStage("deterministic", "Deterministic code checks");
 
     // 3. Run the deterministic Validator with workspace tone profile and brand terms
     sendStage("validator", "Validator governance & deduplication");
@@ -1093,12 +1110,16 @@ app.post(["/api/review", "/review"], async (req, res) => {
       targetDraft.validatorRejected = validationResult.rejected;
       targetDraft.validatorMerged = validationResult.merged;
       targetDraft.stats = validationResult.stats;
-      targetDraft.modelUsed = modelUsed || ACTIVE_MODEL;
+      targetDraft.modelUsed = aiReviewFailed ? null : (modelUsed || ACTIVE_MODEL);
+      targetDraft.aiReviewFailed = aiReviewFailed;
+      targetDraft.aiUnavailableReason = aiUnavailableReason;
       targetDraft.history.push({
         id: `h-${Date.now()}`,
         timestamp: new Date().toISOString(),
-        actor: "BrandGuard AI",
-        action: `AI Review completed (${validationResult.accepted.length} valid findings kept, ${validationResult.rejected.length} dropped by validator)`
+        actor: aiReviewFailed ? "BrandGuard (Deterministic Checks Only)" : "BrandGuard AI",
+        action: aiReviewFailed
+          ? `AI Review unavailable (${aiUnavailableReason}). Code checks completed (${validationResult.accepted.length} findings)`
+          : `AI Review completed (${validationResult.accepted.length} valid findings kept, ${validationResult.rejected.length} dropped by validator)`
       });
       req.saveWs();
     }
@@ -1110,7 +1131,9 @@ app.post(["/api/review", "/review"], async (req, res) => {
       validatorRejected: validationResult.rejected,
       validatorMerged: validationResult.merged,
       stats: validationResult.stats,
-      modelUsed: modelUsed || ACTIVE_MODEL,
+      modelUsed: aiReviewFailed ? null : (modelUsed || ACTIVE_MODEL),
+      aiReviewFailed,
+      aiUnavailableReason,
       updatedDraft: targetDraft
     };
 
