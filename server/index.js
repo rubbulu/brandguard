@@ -52,7 +52,9 @@ import {
   syncClarificationStats,
   normalizeAiFailureReason,
   reopenClarificationRequest,
-  retryClarificationAi
+  retryClarificationAi,
+  createClarificationCard,
+  generateClarificationForRequest
 } from "./clarificationService.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -601,55 +603,26 @@ app.get("/api/clarifications", async (req, res) => {
         );
         if (resolved) continue;
 
-        // Generate clarifying question and wordings via Gemini (with automatic validation & fallback)
-        let questionObj = null;
-        let aiReason = null;
-        try {
-          const aiRes = await callGeminiClarification({
-            apiKey: GEMINI_API_KEY,
-            rule: { id: item.ruleId, text: item.ruleText, category: item.ruleCategory },
-            stats: item.stats,
-            examples: item.examples
-          });
-          questionObj = validateClarificationOutput({
-            aiResult: aiRes,
-            currentText: item.ruleText,
-            ruleId: item.ruleId,
-            rules: req.workspace.rules,
-            stats: item.stats
-          });
-          if (!questionObj.valid) {
-            aiReason = questionObj.aiReason || normalizeAiFailureReason(questionObj.error);
-          }
-        } catch (aiErr) {
-          console.warn(`[Clarification AI Warning]: ${aiErr.message}. Using fallback question.`);
-          aiReason = normalizeAiFailureReason(aiErr);
-          questionObj = {
-            valid: false,
-            aiReason,
-            ...buildFallbackClarification({ ruleId: item.ruleId, stats: item.stats })
-          };
-        }
-
-        const newRequest = {
-          id: `cr-${item.ruleId}-${Date.now()}`,
+        // Create clarification card (shows isGenerating: true while AI call runs)
+        const newRequest = createClarificationCard({
+          workspace: req.workspace,
           ruleId: item.ruleId,
           ruleText: item.ruleText,
           ruleCategory: item.ruleCategory,
           stats: item.stats,
-          examples: item.examples,
-          question: questionObj.question,
-          suggestedWordings: questionObj.suggestedWordings || [],
-          status: "pending",
-          aiAvailable: Boolean(questionObj.aiAvailable),
-          aiReason: questionObj.aiAvailable ? null : (aiReason || "Gemini model unavailable (check GEMINI_MODEL)"),
-          wordingSource: questionObj.aiAvailable ? "ai" : null,
-          appliedWording: null,
-          resolvedAt: null,
-          createdAt: new Date().toISOString()
-        };
+          examples: item.examples
+        });
 
         req.workspace.clarificationRequests.unshift(newRequest);
+        req.saveWs();
+
+        // Run AI generation through retry helper
+        await generateClarificationForRequest({
+          workspace: req.workspace,
+          request: newRequest,
+          apiKey: GEMINI_API_KEY
+        });
+
         req.saveWs();
       }
     }

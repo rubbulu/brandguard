@@ -643,12 +643,93 @@ export function reopenClarificationRequest({ workspace, requestId, ruleId }) {
 }
 
 /**
+ * Creates a new clarification card object for a rule that reached dispute threshold.
+ * Shows isGenerating: true while AI call is running.
+ */
+export function createClarificationCard({ workspace, ruleId, ruleText, ruleCategory, stats, examples }) {
+  const templateQuestion = `Rule ${ruleId} was disputed ${stats?.disputedCount ?? 0} of ${stats?.decidedCount ?? 0} times. Which of these examples should be allowed?`;
+  return {
+    id: `cr-${ruleId}-${Date.now()}`,
+    ruleId,
+    ruleText,
+    ruleCategory: ruleCategory || "policy",
+    stats: stats ? { ...stats } : { totalFlagged: 0, disputedCount: 0, decidedCount: 0, disputePercentage: 0 },
+    examples: Array.isArray(examples) ? [...examples] : [],
+    question: templateQuestion,
+    suggestedWordings: [],
+    status: "pending",
+    isGenerating: true,
+    aiAvailable: false,
+    aiReason: null,
+    wordingSource: null,
+    isDemo: false,
+    appliedWording: null,
+    resolvedAt: null,
+    createdAt: new Date().toISOString()
+  };
+}
+
+/**
+ * Generates AI question and wordings for a clarification request:
+ * - Runs through Gemini with retry helper
+ * - Shows isGenerating: true while running
+ * - Sets plain failure reason only after all retry attempts fail
+ * - Replaces template question only on valid AI result
+ */
+export async function generateClarificationForRequest({ workspace, request, apiKey, retryDelays }) {
+  request.isGenerating = true;
+  const rule = (workspace.rules || []).find(r => r.id === request.ruleId);
+  const currentText = rule ? rule.text : request.ruleText;
+
+  try {
+    const aiResult = await callGeminiClarification({
+      apiKey,
+      rule: { id: request.ruleId, text: currentText, category: request.ruleCategory },
+      stats: request.stats,
+      examples: request.examples,
+      retryDelays
+    });
+
+    const validated = validateClarificationOutput({
+      aiResult,
+      currentText,
+      ruleId: request.ruleId,
+      rules: workspace.rules,
+      stats: request.stats
+    });
+
+    if (validated.valid) {
+      request.question = validated.question;
+      request.suggestedWordings = validated.suggestedWordings;
+      request.aiAvailable = true;
+      request.aiReason = null;
+      request.wordingSource = "ai";
+      request.isDemo = false;
+      request.isGenerating = false;
+      return { success: true, request, message: "AI suggestions generated successfully." };
+    } else {
+      const reason = normalizeAiFailureReason(validated.error);
+      request.aiReason = reason;
+      request.aiAvailable = false;
+      request.isGenerating = false;
+      return { success: false, request, error: reason };
+    }
+  } catch (err) {
+    const reason = normalizeAiFailureReason(err);
+    request.aiReason = reason;
+    request.aiAvailable = false;
+    request.isGenerating = false;
+    return { success: false, request, error: reason };
+  }
+}
+
+/**
  * Retries generating AI suggestions for a clarification request:
  * - Calls Gemini and validates output
  * - Replaces template only if the output passes validation
  * - Stores plain failure reason if it fails
  */
-export async function retryClarificationAi({ workspace, requestId, apiKey }) {
+export async function retryClarificationAi({ workspace, requestId, apiKey, retryDelays }) {
   if (!workspace) throw new Error("Workspace is required.");
   const request = (workspace.clarificationRequests || []).find(r => r.id === requestId);
   if (!request) {
@@ -665,42 +746,7 @@ export async function retryClarificationAi({ workspace, requestId, apiKey }) {
   request.stats = { ...currentStats };
   request.examples = currentExamples;
 
-  try {
-    const aiResult = await callGeminiClarification({
-      apiKey,
-      rule: { id: request.ruleId, text: rule.text, category: rule.category },
-      stats: currentStats,
-      examples: currentExamples
-    });
-
-    const validated = validateClarificationOutput({
-      aiResult,
-      currentText: rule.text,
-      ruleId: request.ruleId,
-      rules: workspace.rules,
-      stats: currentStats
-    });
-
-    if (validated.valid) {
-      request.question = validated.question;
-      request.suggestedWordings = validated.suggestedWordings;
-      request.aiAvailable = true;
-      request.aiReason = null;
-      request.wordingSource = "ai";
-      request.isDemo = false;
-      return { success: true, request, message: "AI suggestions generated successfully." };
-    } else {
-      const reason = normalizeAiFailureReason(validated.error);
-      request.aiReason = reason;
-      request.aiAvailable = false;
-      return { success: false, request, error: reason };
-    }
-  } catch (err) {
-    const reason = normalizeAiFailureReason(err);
-    request.aiReason = reason;
-    request.aiAvailable = false;
-    return { success: false, request, error: reason };
-  }
+  return generateClarificationForRequest({ workspace, request, apiKey, retryDelays });
 }
 
 /**

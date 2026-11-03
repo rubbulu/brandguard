@@ -21,11 +21,13 @@ import {
 import {
   seedClarificationDemo,
   retryClarificationAi,
-  validateClarificationOutput
+  validateClarificationOutput,
+  createClarificationCard,
+  generateClarificationForRequest
 } from "../clarificationService.js";
 import { computeRedlineChunks } from "../../client/src/utils/redlineUtils.js";
 import { detectPromptInjection } from "../securityScanner.js";
-import { compareChannelTones, resolveChannelProfile, validateFindings } from "../validator.js";
+import { compareChannelTones, resolveChannelProfile, validateFindings, mergeFindings } from "../validator.js";
 import { INITIAL_TONE_PROFILES, INITIAL_RULES, INITIAL_FACTS, INITIAL_BRAND_TERMS } from "../demoData.js";
 import { loadWorkspace, saveWorkspace } from "../workspaceStore.js";
 import { callGeminiReview, callGeminiWithRetry, BUSY_ERROR_MESSAGE } from "../geminiService.js";
@@ -1862,6 +1864,250 @@ describe("Round 3: Removal, Security, Design Fixes & Certificate Verification", 
     const ws2 = loadWorkspace(wsId);
     const approvedRules = (ws2.rules || []).filter(r => r.text === "Test rule policy text.");
     assert.equal(approvedRules.length, 1, "Retrying proposal approval must not duplicate rules in library");
+  });
+
+  // Test 36: when validator merges two findings quoting exact same text, reason must be 'Merged 2 findings on the same text "!!!" into one (rule T-03)'
+  test("validator merges two findings quoting exact same text with updated message", () => {
+    const rawFindings = [
+      {
+        id: "f-1",
+        rule_id: "T-03",
+        quote: "!!!",
+        start: 10,
+        end: 13,
+        severity: "medium",
+        explanation: "Multiple exclamation marks",
+        suggested_fix: "!"
+      },
+      {
+        id: "f-2",
+        rule_id: "T-03",
+        quote: "!!!",
+        start: 10,
+        end: 13,
+        severity: "high",
+        explanation: "Excessive exclamation marks",
+        suggested_fix: "!"
+      }
+    ];
+
+    const draftText = "Hello all!!! Welcome.";
+    const { mergedFindings, mergedCount, mergedList } = mergeFindings(rawFindings, draftText);
+    assert.equal(mergedCount, 1, "Must merge duplicate finding on exact same text");
+    assert.equal(mergedFindings.length, 1, "Only one finding should remain");
+    assert.equal(mergedList.length, 1);
+    assert.equal(
+      mergedList[0].reason,
+      'Merged 2 findings on the same text "!!!" into one (rule T-03)',
+      "Reason must match exact requested wording for duplicate quotes"
+    );
+  });
+
+  // Test 37: clarification card: 503 then success gives AI wordings labelled 'AI-suggested' with no 'unavailable' message
+  test("clarification card: 503 then success gives AI wordings labelled 'AI-suggested' with no 'unavailable' message", async () => {
+    const origFetch = global.fetch;
+    let attempts = 0;
+    global.fetch = async () => {
+      attempts++;
+      if (attempts === 1) {
+        return {
+          status: 503,
+          ok: false,
+          text: async () => "Service Unavailable"
+        };
+      }
+      return {
+        status: 200,
+        ok: true,
+        json: async () => ({
+          candidates: [{
+            content: {
+              parts: [{
+                text: JSON.stringify({
+                  question: "In what contexts should students be referred to as youth?",
+                  suggested_wordings: [
+                    "Say 'students' for college programs; 'youth' is permitted for under-18 workshops.",
+                    "Refer to enrolled attendees as 'students'; 'kids' is allowed only for K-12 activities."
+                  ]
+                })
+              }]
+            }
+          }]
+        })
+      };
+    };
+
+    try {
+      const workspace = {
+        rules: [{ id: "R-07", text: "Say 'students', not 'kids'.", category: "terminology" }],
+        drafts: []
+      };
+      const req = createClarificationCard({
+        workspace,
+        ruleId: "R-07",
+        ruleText: "Say 'students', not 'kids'.",
+        ruleCategory: "terminology",
+        stats: { totalFlagged: 5, disputedCount: 3, decidedCount: 5, disputePercentage: 60 },
+        examples: []
+      });
+
+      const res = await generateClarificationForRequest({
+        workspace,
+        request: req,
+        apiKey: "mock-key",
+        retryDelays: [10, 20]
+      });
+
+      assert.equal(attempts, 2, "Must retry on 503 and succeed on attempt 2");
+      assert.equal(res.success, true);
+      assert.equal(req.aiAvailable, true, "aiAvailable must be true after success");
+      assert.equal(req.aiReason, null, "aiReason must be null (no unavailable message)");
+      assert.equal(req.wordingSource, "ai");
+      assert.equal(req.isGenerating, false);
+      const label = req.wordingSource === "ai" ? "AI-suggested" : "Demo wording";
+      assert.equal(label, "AI-suggested", "Label must be 'AI-suggested'");
+      assert.ok(req.suggestedWordings.length >= 2);
+    } finally {
+      global.fetch = origFetch;
+    }
+  });
+
+  // Test 38: clarification card: 503 three times gives friendly message
+  test("clarification card: 503 three times gives friendly message and aiAvailable false", async () => {
+    const origFetch = global.fetch;
+    let attempts = 0;
+    global.fetch = async () => {
+      attempts++;
+      return {
+        status: 503,
+        ok: false,
+        text: async () => "Service Unavailable"
+      };
+    };
+
+    try {
+      const workspace = {
+        rules: [{ id: "R-07", text: "Say 'students', not 'kids'.", category: "terminology" }],
+        drafts: []
+      };
+      const req = createClarificationCard({
+        workspace,
+        ruleId: "R-07",
+        ruleText: "Say 'students', not 'kids'.",
+        ruleCategory: "terminology",
+        stats: { totalFlagged: 5, disputedCount: 3, decidedCount: 5, disputePercentage: 60 },
+        examples: []
+      });
+
+      const res = await generateClarificationForRequest({
+        workspace,
+        request: req,
+        apiKey: "mock-key",
+        retryDelays: [10, 20]
+      });
+
+      assert.equal(attempts, 3, "Must attempt at most 3 times before failing");
+      assert.equal(res.success, false);
+      assert.equal(req.aiAvailable, false);
+      assert.equal(req.isGenerating, false);
+      assert.equal(req.aiReason, "Google's AI service is busy right now. Please click Retry in a moment.");
+      assert.ok(!req.aiReason.includes("503"));
+      assert.ok(!req.aiReason.includes("gemini"));
+    } finally {
+      global.fetch = origFetch;
+    }
+  });
+
+  // Test 39: a card created from real disputes triggers one AI call and shows 'Generating' first
+  test("a card created from real disputes triggers one AI call and shows 'Generating' first", async () => {
+    const origFetch = global.fetch;
+    let attempts = 0;
+    let stateDuringCall = null;
+
+    const workspace = {
+      rules: [{ id: "R-07", text: "Say 'students', not 'kids'.", category: "terminology" }],
+      drafts: [
+        {
+          id: "d1",
+          findings: [{ rule_id: "R-07", status: "rejected", quote: "kids", suggested_fix: "students" }]
+        },
+        {
+          id: "d2",
+          findings: [{ rule_id: "R-07", status: "edited", quote: "kids", suggested_fix: "youth" }]
+        },
+        {
+          id: "d3",
+          findings: [{ rule_id: "R-07", status: "accepted", quote: "kids", suggested_fix: "students" }]
+        }
+      ],
+      clarificationRequests: []
+    };
+
+    // Card created from real disputes
+    const card = createClarificationCard({
+      workspace,
+      ruleId: "R-07",
+      ruleText: "Say 'students', not 'kids'.",
+      ruleCategory: "terminology",
+      stats: { totalFlagged: 3, disputedCount: 2, decidedCount: 3, disputePercentage: 67 },
+      examples: []
+    });
+
+    // 1. Upon creation, card shows Generating first
+    assert.equal(card.isGenerating, true, "Card must show isGenerating: true first");
+    assert.equal(card.aiAvailable, false, "aiAvailable is false initially");
+    assert.equal(card.aiReason, null, "aiReason must be null (not unavailable yet)");
+
+    global.fetch = async () => {
+      attempts++;
+      // Snapshot state during AI call
+      stateDuringCall = {
+        isGenerating: card.isGenerating,
+        aiAvailable: card.aiAvailable,
+        aiReason: card.aiReason
+      };
+      return {
+        status: 200,
+        ok: true,
+        json: async () => ({
+          candidates: [{
+            content: {
+              parts: [{
+                text: JSON.stringify({
+                  question: "Should 'kids' be permitted for K-12 youth workshops?",
+                  suggested_wordings: [
+                    "Say 'students' for college audiences; 'kids' is permitted for under-18 youth programs.",
+                    "Refer to college attendees as 'students'; youth programs may use 'kids'."
+                  ]
+                })
+              }]
+            }
+          }]
+        })
+      };
+    };
+
+    try {
+      await generateClarificationForRequest({
+        workspace,
+        request: card,
+        apiKey: "mock-key",
+        retryDelays: [10, 20]
+      });
+
+      // 2. While call ran: was Generating, exactly 1 AI call triggered
+      assert.equal(attempts, 1, "Must trigger exactly one AI call");
+      assert.equal(stateDuringCall.isGenerating, true, "State while running must show Generating");
+      assert.equal(stateDuringCall.aiReason, null, "Must NOT show unavailable while running");
+
+      // 3. After completion: Generating finished, AI suggestions available
+      assert.equal(card.isGenerating, false, "isGenerating must be false after completion");
+      assert.equal(card.aiAvailable, true, "aiAvailable is true after success");
+      assert.equal(card.wordingSource, "ai", "Wordings sourced from AI");
+      assert.equal(card.suggestedWordings.length, 2);
+    } finally {
+      global.fetch = origFetch;
+    }
   });
 
 });

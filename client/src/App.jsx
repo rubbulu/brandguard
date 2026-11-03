@@ -3244,7 +3244,7 @@ export default function App() {
                                 <div className="flex items-center gap-1.5 text-xs font-bold text-purple-900">
                                   <HelpCircle className="w-4 h-4 text-purple-600" />
                                   <span>Clarifying Question for Brand Manager</span>
-                                  {!request.aiAvailable && (
+                                  {(!request.aiAvailable && !request.isGenerating && !isRetryingThis && !request.isDemo && request.wordingSource !== "demo" && request.wordingSource !== "ai") && (
                                     <span className="text-[10px] font-normal text-purple-600 italic ml-1">
                                       (Template question shown)
                                     </span>
@@ -3253,7 +3253,12 @@ export default function App() {
                                 <p className="text-xs text-purple-950 font-medium leading-relaxed">
                                   {request.question}
                                 </p>
-                                {!request.aiAvailable && (
+                                {(request.isGenerating || isRetryingThis) ? (
+                                  <div className="flex items-center gap-2 pt-2 border-t border-purple-200/60 mt-1 text-xs text-purple-700 font-medium">
+                                    <RefreshCw className="w-3.5 h-3.5 text-purple-600 animate-spin shrink-0" />
+                                    <span>Generating AI wordings...</span>
+                                  </div>
+                                ) : !request.aiAvailable ? (
                                   <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-purple-200/60 mt-1">
                                     <div className="text-[11px] text-amber-800 font-medium flex items-center gap-1.5">
                                       <Info className="w-3.5 h-3.5 text-amber-600 shrink-0" />
@@ -3266,7 +3271,7 @@ export default function App() {
                                           if (request.aiReason) {
                                             return `AI suggestions unavailable (${request.aiReason})`;
                                           }
-                                          return "AI suggestions unavailable";
+                                          return "AI suggestions pending...";
                                         })()}
                                       </span>
                                     </div>
@@ -3276,20 +3281,11 @@ export default function App() {
                                       onClick={() => handleRetryClarification(request.id)}
                                       className="px-2.5 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all disabled:opacity-50 shadow-2xs"
                                     >
-                                      {isRetryingThis ? (
-                                        <>
-                                          <RefreshCw className="w-3 h-3 animate-spin" />
-                                          Retrying AI suggestions...
-                                        </>
-                                      ) : (
-                                        <>
-                                          <Sparkles className="w-3 h-3" />
-                                          Retry AI suggestions
-                                        </>
-                                      )}
+                                      <Sparkles className="w-3 h-3" />
+                                      Retry AI suggestions
                                     </button>
                                   </div>
-                                )}
+                                ) : null}
                               </div>
 
                               {/* Pending State: Suggested Wordings & Actions */}

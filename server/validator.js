@@ -411,6 +411,10 @@ export function mergeFindings(findings, draftText = "") {
           // Merge current into existing
           isMerged = true;
           mergedCount++;
+          const isExactQuote = (current.quote || "").trim() === (existing.quote || "").trim();
+          const reason = isExactQuote
+            ? `Merged 2 findings on the same text "${current.quote}" into one (rule ${rId})`
+            : `Merged duplicate/overlapping [${rId}] finding on "${current.quote}" into "${existing.quote}".`;
           mergedList.push({
             keptId: existing.id,
             mergedId: current.id,
@@ -420,7 +424,7 @@ export function mergeFindings(findings, draftText = "") {
             originalQuote: current.quote,
             quote: current.quote,
             mergedIntoQuote: existing.quote,
-            reason: `Merged duplicate/overlapping [${rId}] finding on "${current.quote}" into "${existing.quote}".`
+            reason
           });
 
           // For SEC-01, always enforce keeping the narrowest span
