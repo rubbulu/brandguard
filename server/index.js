@@ -106,8 +106,15 @@ const workspaceMiddleware = (req, res, next) => {
   req.saveWs = () => saveWorkspace(req.workspaceId, req.workspace);
   if (req.workspace._wasReset) {
     res.setHeader("X-Workspace-Reset", "1");
+    req.wasReset = true;
+    req.wasMissing = Boolean(req.workspace._wasMissing);
+    // Clear flag immediately so subsequent requests never repeat reset
+    req.workspace._wasReset = false;
+    req.workspace._wasMissing = false;
   } else {
     res.setHeader("X-Workspace-Reset", "0");
+    req.wasReset = false;
+    req.wasMissing = false;
   }
   next();
 };
@@ -119,8 +126,8 @@ app.use("/visual-settings", workspaceMiddleware);
 app.get("/api/workspace/status", (req, res) => {
   res.json({
     workspaceId: req.workspaceId,
-    wasReset: Boolean(req.workspace._wasReset),
-    wasMissing: Boolean(req.workspace._wasMissing),
+    wasReset: Boolean(req.wasReset),
+    wasMissing: Boolean(req.wasMissing),
     createdAt: req.workspace.createdAt
   });
 });

@@ -397,11 +397,19 @@ export default function App() {
       ]);
 
       // Detect if server reset/reseeded workspace after redeploy or idle clearance
-      const wasResetHeader = rulesRes?.headers?.get("x-workspace-reset");
-      if (wasResetHeader === "1") {
+      const responses = [rulesRes, factsRes, samplesRes, draftsRes, insightsRes, visualRes, toneRes, guidelinesRes, clarificationsRes];
+      const wasResetReported = responses.some(r => r?.headers?.get("x-workspace-reset") === "1");
+
+      let alreadyShownThisSession = false;
+      try {
+        alreadyShownThisSession = sessionStorage.getItem("brandguard_workspace_reset_shown") === "true";
+      } catch (_) {}
+
+      if (wasResetReported && !alreadyShownThisSession) {
         try {
           if (localStorage.getItem("brandguard_has_visited") === "true") {
             setWorkspaceResetNotice(true);
+            sessionStorage.setItem("brandguard_workspace_reset_shown", "true");
             sessionStorage.removeItem("brandguard_active_draft_id");
           }
         } catch (_) {}
@@ -2233,7 +2241,12 @@ export default function App() {
             </span>
           </div>
           <button
-            onClick={() => setWorkspaceResetNotice(false)}
+            onClick={() => {
+              setWorkspaceResetNotice(false);
+              try {
+                sessionStorage.setItem("brandguard_workspace_reset_shown", "true");
+              } catch (_) {}
+            }}
             className="text-amber-700 hover:text-amber-950 font-bold p-1 rounded hover:bg-amber-200/50 text-xs ml-3"
             aria-label="Dismiss workspace reset notice"
           >

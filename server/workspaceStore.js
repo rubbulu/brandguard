@@ -184,7 +184,9 @@ export function saveWorkspace(workspaceId, data) {
   const filePath = getFilePath(safeId);
   try {
     data.updatedAt = new Date().toISOString();
-    const content = JSON.stringify(data, null, 2);
+    // Do NOT write transient flags (_wasReset, _wasMissing) to the permanent workspace file
+    const { _wasReset, _wasMissing, ...persistedData } = data;
+    const content = JSON.stringify(persistedData, null, 2);
     writeFileSyncAtomic(filePath, content);
     workspaceCache.set(safeId, data);
   } catch (err) {

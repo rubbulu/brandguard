@@ -114,6 +114,16 @@ describe("Prompt 6b: Storage and Reliability Hardening", () => {
     assert.equal(body.wasMissing, true);
     assert.equal(res.headers["x-workspace-reset"], "1");
 
+    // Second call to status must immediately report no reset
+    const resSecond = await invokeApp({
+      method: "GET",
+      url: "/api/workspace/status",
+      headers: { "x-workspace-id": nonExistentWsId }
+    });
+    const bodySecond = await resSecond.json();
+    assert.equal(bodySecond.wasReset, false, "Second call must report wasReset: false");
+    assert.equal(resSecond.headers["x-workspace-reset"], "0", "Second call must set X-Workspace-Reset to 0");
+
     // Workspace now exists on disk as a clean seeded workspace
     assert.ok(fs.existsSync(filePath));
     const cleanWs = JSON.parse(fs.readFileSync(filePath, "utf-8"));
@@ -124,6 +134,80 @@ describe("Prompt 6b: Storage and Reliability Hardening", () => {
     // Clean up
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     workspaceCache.delete(nonExistentWsId);
+  });
+
+  test("workspace reset single reporting and refresh persistence (Round 3 fix)", async () => {
+    const wsId = `ws_single_reset_${Date.now()}`;
+    const filePath = path.join(WORKSPACES_DIR, `${wsId}.json`);
+
+    // Ensure clean state: missing workspace
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    workspaceCache.delete(wsId);
+
+    // 1. First load with a missing workspace reports reset once
+    const res1 = await invokeApp({
+      method: "GET",
+      url: "/api/rules",
+      headers: { "x-workspace-id": wsId }
+    });
+    assert.equal(res1.status, 200);
+    assert.equal(res1.headers["x-workspace-reset"], "1", "First load of missing workspace must report reset once (header=1)");
+
+    // 2. Second load reports no reset
+    const res2 = await invokeApp({
+      method: "GET",
+      url: "/api/rules",
+      headers: { "x-workspace-id": wsId }
+    });
+    assert.equal(res2.status, 200);
+    assert.equal(res2.headers["x-workspace-reset"], "0", "Second load must report no reset (header=0)");
+
+    const statusRes = await invokeApp({
+      method: "GET",
+      url: "/api/workspace/status",
+      headers: { "x-workspace-id": wsId }
+    });
+    const statusBody = await statusRes.json();
+    assert.equal(statusBody.wasReset, false, "Subsequent status check must report wasReset: false");
+    assert.equal(statusRes.headers["x-workspace-reset"], "0");
+
+    // 3. An existing workspace never reports reset
+    const postDraftRes = await invokeApp({
+      method: "POST",
+      url: "/api/drafts",
+      headers: { "x-workspace-id": wsId },
+      body: {
+        title: "Test Draft Refresh Survival",
+        channel: "Social Media / Twitter",
+        content: "CampusPro is a modern platform."
+      }
+    });
+    assert.equal(postDraftRes.status, 201);
+    const createdDraft = await postDraftRes.json();
+    assert.ok(createdDraft.id);
+    assert.equal(postDraftRes.headers["x-workspace-reset"], "0", "Existing workspace operation must never report reset");
+
+    // 4. Refresh keeps the workspace and its drafts
+    // Invalidate in-memory cache to simulate server restart / fresh reload from disk
+    workspaceCache.delete(wsId);
+
+    const refreshDraftsRes = await invokeApp({
+      method: "GET",
+      url: "/api/drafts",
+      headers: { "x-workspace-id": wsId }
+    });
+    assert.equal(refreshDraftsRes.status, 200);
+    assert.equal(refreshDraftsRes.headers["x-workspace-reset"], "0", "Refresh with existing workspace must never report reset");
+
+    const draftsList = await refreshDraftsRes.json();
+    assert.ok(Array.isArray(draftsList));
+    assert.equal(draftsList.length, 1, "Refresh must keep drafts list");
+    assert.equal(draftsList[0].id, createdDraft.id, "Draft ID must match original");
+    assert.equal(draftsList[0].originalText, "CampusPro is a modern platform.");
+
+    // Clean up
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    workspaceCache.delete(wsId);
   });
 
   // Test 2: Item 7 - Certificates survive server restart via self-contained record verification
