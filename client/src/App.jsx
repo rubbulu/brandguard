@@ -4366,7 +4366,15 @@ export default function App() {
                     className="w-full p-3 text-sm rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500 font-sans"
                   />
                   <div className="flex items-center justify-between text-[11px] text-slate-400 mt-1">
-                    <span>Characters: {draftContent.length} | Words: {draftContent.trim().split(/\s+/).filter(Boolean).length}</span>
+                    <span>
+                      <span>Characters: {draftContent.length}</span>
+                      {toneProfiles?.[draftChannel]?.maxCharacters > 0 && draftContent.length > toneProfiles[draftChannel].maxCharacters && (
+                        <span className="text-red-600 font-bold ml-1.5">
+                          Over the {draftChannel.includes("Twitter") ? "Twitter" : draftChannel} limit ({toneProfiles[draftChannel].maxCharacters})
+                        </span>
+                      )}
+                      <span> | Words: {draftContent.trim().split(/\s+/).filter(Boolean).length}</span>
+                    </span>
                     <span className="text-slate-500">Rules active: {rules.length} ({rules.filter(r => r.source).length} imported) | Facts active: {facts.length} ({facts.filter(f => f.source).length} imported)</span>
                   </div>
                 </div>
